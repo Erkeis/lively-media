@@ -2,7 +2,6 @@
 import Foundation
 import CoreStorage
 
-@MainActor
 public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
     public private(set) var state: PlaybackState = .idle
     public private(set) var currentPosition: TimeInterval = 0.0
@@ -60,7 +59,10 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
     public func seek(to position: TimeInterval) {
         let clamped = max(0, min(position, duration))
         currentPosition = clamped
-        onPositionChange?(currentPosition, duration)
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.onPositionChange?(self.currentPosition, self.duration)
+        }
     }
 
     public func selectAudioTrack(index: Int) {
@@ -97,7 +99,9 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
 
     private func updateState(_ newState: PlaybackState) {
         self.state = newState
-        self.onStateChange?(newState)
+        Task { @MainActor [weak self] in
+            self?.onStateChange?(newState)
+        }
     }
 
     public func releaseResources() {

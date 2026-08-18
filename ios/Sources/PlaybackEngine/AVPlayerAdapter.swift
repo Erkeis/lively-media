@@ -4,7 +4,6 @@ import AVFoundation
 import AVKit
 import CoreStorage
 
-@MainActor
 public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Sendable {
     public private(set) var state: PlaybackState = .idle
     public private(set) var currentPosition: TimeInterval = 0.0
@@ -126,7 +125,10 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
         currentPosition = clamped
         let targetTime = CMTime(seconds: clamped, preferredTimescale: 600)
         player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        onPositionChange?(currentPosition, duration)
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.onPositionChange?(self.currentPosition, self.duration)
+        }
     }
 
     public func selectAudioTrack(index: Int) {
@@ -147,7 +149,9 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
 
     private func updateState(_ newState: PlaybackState) {
         self.state = newState
-        self.onStateChange?(newState)
+        Task { @MainActor [weak self] in
+            self?.onStateChange?(newState)
+        }
     }
 
     public func releaseResources() {

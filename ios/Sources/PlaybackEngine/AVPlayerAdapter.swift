@@ -4,6 +4,7 @@ import AVFoundation
 import AVKit
 import CoreStorage
 
+@MainActor
 public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Sendable {
     public private(set) var state: PlaybackState = .idle
     public private(set) var currentPosition: TimeInterval = 0.0
@@ -45,12 +46,11 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
         // Periodic time observer for 60Hz/120Hz smooth scrubber updates
         let interval = CMTime(seconds: 0.2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self = self else { return }
-            let seconds = CMTimeGetSeconds(time)
-            if seconds.isFinite {
-                self.currentPosition = seconds
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                let seconds = CMTimeGetSeconds(time)
+                if seconds.isFinite {
+                    self.currentPosition = seconds
                     self.onPositionChange?(self.currentPosition, self.duration)
                 }
             }
@@ -58,16 +58,18 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
 
         // Time control status observation (playing, paused, buffering)
         timeControlStatusObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
-            guard let self = self else { return }
-            switch player.timeControlStatus {
-            case .playing:
-                self.updateState(.playing)
-            case .paused:
-                self.updateState(.paused)
-            case .waitingToPlayAtSpecifiedRate:
-                self.updateState(.buffering)
-            @unknown default:
-                break
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                switch player.timeControlStatus {
+                case .playing:
+                    self.updateState(.playing)
+                case .paused:
+                    self.updateState(.paused)
+                case .waitingToPlayAtSpecifiedRate:
+                    self.updateState(.buffering)
+                @unknown default:
+                    break
+                }
             }
         }
     }
@@ -102,8 +104,8 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
     }
 
     public func play() {
+        player.play()
         updateState(.playing)
-        player.rate = _playbackRate
     }
 
     public func pause() {
@@ -124,10 +126,11 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
         currentPosition = clamped
         let targetTime = CMTime(seconds: clamped, preferredTimescale: 600)
         player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        onPositionChange?(currentPosition, duration)
     }
 
     public func selectAudioTrack(index: Int) {
-        // Switch audio group characteristic
+        // Switch audible group characteristic
     }
 
     public func selectSubtitleTrack(index: Int) {
@@ -135,15 +138,16 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
     }
 
     @objc private func playerItemDidReachEnd(notification: Notification) {
-        currentPosition = duration
-        updateState(.paused)
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.currentPosition = self.duration
+            self.updateState(.paused)
+        }
     }
 
     private func updateState(_ newState: PlaybackState) {
         self.state = newState
-        Task { @MainActor [weak self] in
-            self?.onStateChange?(newState)
-        }
+        self.onStateChange?(newState)
     }
 
     public func releaseResources() {

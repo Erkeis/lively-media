@@ -2,6 +2,7 @@
 import Foundation
 import CoreStorage
 
+@MainActor
 public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
     public private(set) var state: PlaybackState = .idle
     public private(set) var currentPosition: TimeInterval = 0.0
@@ -76,19 +77,15 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
 
     private func startSimulationTimer() {
         stopSimulationTimer()
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
                 guard let self = self, self.state == .playing else { return }
                 self.currentPosition += (0.25 * Double(self.playbackRate))
                 if self.currentPosition >= self.duration {
                     self.currentPosition = self.duration
                     self.pause()
                 }
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    self.onPositionChange?(self.currentPosition, self.duration)
-                }
+                self.onPositionChange?(self.currentPosition, self.duration)
             }
         }
     }
@@ -100,9 +97,7 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
 
     private func updateState(_ newState: PlaybackState) {
         self.state = newState
-        Task { @MainActor [weak self] in
-            self?.onStateChange?(newState)
-        }
+        self.onStateChange?(newState)
     }
 
     public func releaseResources() {

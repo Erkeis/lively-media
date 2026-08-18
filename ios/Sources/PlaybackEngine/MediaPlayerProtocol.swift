@@ -25,6 +25,7 @@ public struct TrackOption: Sendable, Identifiable, Hashable {
     }
 }
 
+@MainActor
 public protocol MediaPlayerProtocol: AnyObject, Sendable {
     var state: PlaybackState { get }
     var currentPosition: TimeInterval { get }

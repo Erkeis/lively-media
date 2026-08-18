@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## [Case Studies & Troubleshooting Knowledge Base] - 2026-08-18
+### Added
+- **`docs/case-studies/`**:
+  - `README.md`: Taxonomy, classification matrix, and quick reference index.
+  - `MAJOR_CASES.md`: In-depth root-cause analyses for ARC deallocation weak reference crash (M-01), Swift 6 strict concurrency hierarchy (M-02), test runner `_main` duplicate symbol collision (M-03), Swift Playgrounds vs CLI packaging separation (M-04), 4K HEVC HDR live stream cache invalidation (M-05), and Chromecast HTTP 206 stream bridge (M-06).
+  - `MINOR_CASES.md`: Tactical case studies covering FlyingFox async API modernization (m-01), macOS cross-platform `.fullScreenCover` guards (m-02), GRDB parameter label syntax (m-03), Swift identifier lexical rules (m-04), tools version CI compatibility (m-05), native AirPlay `AVRoutePickerView` integration (m-06), and 10-band EQ preset synthesis (m-07).
+
 ## [Phase 4: In-App Browser & Background Downloader] - 2026-08-17
 ### Added
 - **`WebSnifferEngine`**:

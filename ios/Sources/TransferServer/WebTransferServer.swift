@@ -48,7 +48,7 @@ public final class WebTransferServer: @unchecked Sendable {
 
             // 3. Upload API
             await server.appendRoute("POST /api/upload") { [targetDirectory] request in
-                let body = request.body
+                let body = try await request.bodyData
                 // Extract filename from header or assign default
                 let filename = request.headers[HTTPHeader("X-File-Name")] ?? "upload_\(UUID().uuidString).bin"
                 let destinationURL = targetDirectory.appendingPathComponent(filename)
@@ -111,7 +111,7 @@ public final class WebTransferServer: @unchecked Sendable {
     public func start() async throws {
         guard !isRunning else { return }
         isRunning = true
-        try await server.start()
+        try await server.run()
     }
 
     public func stop() async {

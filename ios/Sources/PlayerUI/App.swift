@@ -11,7 +11,6 @@ import WebSnifferEngine
 import DownloadManagerEngine
 import PodcastEngine
 
-@main
 public struct LivelyMediaApp: App {
     @StateObject private var playbackCoordinator = PlaybackCoordinator.shared
     @StateObject private var castCoordinator = CastCoordinator.shared

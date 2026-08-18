@@ -38,8 +38,8 @@ public struct InAppBrowserView: View {
     @ObservedObject public var browserCoordinator: WebBrowserCoordinator
     @State private var inputURLText: String = "https://apple.com"
 
-    public init(browserCoordinator: WebBrowserCoordinator = .shared) {
-        self.browserCoordinator = browserCoordinator
+    public init(browserCoordinator: WebBrowserCoordinator? = nil) {
+        self.browserCoordinator = browserCoordinator ?? WebBrowserCoordinator.shared
     }
 
     public var body: some View {

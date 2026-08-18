@@ -16,8 +16,8 @@ public struct VideoPlayerOverlayView: View {
     @State private var doubleTapIsForward: Bool = true
     @State private var controlsTimer: Timer?
 
-    public init(coordinator: PlaybackCoordinator = .shared) {
-        self.coordinator = coordinator
+    public init(coordinator: PlaybackCoordinator? = nil) {
+        self.coordinator = coordinator ?? PlaybackCoordinator.shared
     }
 
     public var body: some View {

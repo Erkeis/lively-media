@@ -6,8 +6,8 @@ import PlaybackEngine
 public struct MiniPlayerView: View {
     @ObservedObject public var coordinator: PlaybackCoordinator
 
-    public init(coordinator: PlaybackCoordinator = .shared) {
-        self.coordinator = coordinator
+    public init(coordinator: PlaybackCoordinator? = nil) {
+        self.coordinator = coordinator ?? PlaybackCoordinator.shared
     }
 
     private var progress: Double {

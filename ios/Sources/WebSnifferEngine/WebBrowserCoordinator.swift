@@ -21,11 +21,11 @@ public final class WebBrowserCoordinator: NSObject, ObservableObject, WKScriptMe
     private let castCoordinator: CastCoordinator
 
     public init(
-        playbackCoordinator: PlaybackCoordinator = .shared,
-        castCoordinator: CastCoordinator = .shared
+        playbackCoordinator: PlaybackCoordinator? = nil,
+        castCoordinator: CastCoordinator? = nil
     ) {
-        self.playbackCoordinator = playbackCoordinator
-        self.castCoordinator = castCoordinator
+        self.playbackCoordinator = playbackCoordinator ?? PlaybackCoordinator.shared
+        self.castCoordinator = castCoordinator ?? CastCoordinator.shared
         super.init()
     }
 

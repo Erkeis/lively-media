@@ -15,8 +15,8 @@ public struct AudioPlayerModalView: View {
         LyricLine(time: 80.0, text: "Universal playback for all formats")
     ]
 
-    public init(coordinator: PlaybackCoordinator = .shared) {
-        self.coordinator = coordinator
+    public init(coordinator: PlaybackCoordinator? = nil) {
+        self.coordinator = coordinator ?? PlaybackCoordinator.shared
     }
 
     public var body: some View {

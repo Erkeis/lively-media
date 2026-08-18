@@ -128,9 +128,15 @@ public struct MainSplitNavigationView: View {
         .sheet(isPresented: $coordinator.isFullscreenAudioPresented) {
             AudioPlayerModalView(coordinator: coordinator)
         }
+        #if os(iOS)
         .fullScreenCover(isPresented: $coordinator.isFullscreenVideoPresented) {
             VideoPlayerOverlayView(coordinator: coordinator)
         }
+        #else
+        .sheet(isPresented: $coordinator.isFullscreenVideoPresented) {
+            VideoPlayerOverlayView(coordinator: coordinator)
+        }
+        #endif
     }
 
     // iPhone Bottom Tab Bar Layout
@@ -186,8 +192,14 @@ public struct MainSplitNavigationView: View {
         .sheet(isPresented: $coordinator.isFullscreenAudioPresented) {
             AudioPlayerModalView(coordinator: coordinator)
         }
+        #if os(iOS)
         .fullScreenCover(isPresented: $coordinator.isFullscreenVideoPresented) {
             VideoPlayerOverlayView(coordinator: coordinator)
         }
+        #else
+        .sheet(isPresented: $coordinator.isFullscreenVideoPresented) {
+            VideoPlayerOverlayView(coordinator: coordinator)
+        }
+        #endif
     }
 }

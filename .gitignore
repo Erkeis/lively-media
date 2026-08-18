@@ -1,0 +1,24 @@
+# Xcode & Swift
+.DS_Store
+*/.DS_Store
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+.swiftpm/xcode/
+
+# Local database & temp artifacts
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.png
+*.jpeg.png
+*.log
+
+# Environment & credentials
+.env
+.env.local

@@ -1,0 +1,56 @@
+name: Build LivelyMedia iOS App & IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Package LivelyMedia iOS
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.0.app || sudo xcode-select -s /Applications/Xcode_15.4.app
+          xcodebuild -version
+          swift --version
+
+      - name: Run Modular Swift 6 Package Tests
+        run: |
+          cd ios
+          swift test --enable-code-coverage
+
+      - name: Build Standalone Playgrounds Bundle & Archive
+        run: |
+          mkdir -p build/Payload
+          cd LivelyMedia.swiftpm
+          swift build -c release --triple arm64-apple-ios18.0-simulator || swift build -c release
+          cd ..
+          
+          # Create IPA Structure for Sideloadly / AltStore
+          mkdir -p build/Payload/LivelyMedia.app
+          cp -R LivelyMedia.swiftpm/* build/Payload/LivelyMedia.app/ || true
+          cd build
+          zip -r LivelyMedia-iOS.ipa Payload
+          cd ..
+
+      - name: Upload LivelyMedia IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivelyMedia-iOS-IPA
+          path: build/LivelyMedia-iOS.ipa
+          retention-days: 14
+
+      - name: Upload Playgrounds Standalone Bundle (.swiftpm)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivelyMedia-SwiftPlaygrounds-Bundle
+          path: LivelyMedia.swiftpm/
+          retention-days: 14

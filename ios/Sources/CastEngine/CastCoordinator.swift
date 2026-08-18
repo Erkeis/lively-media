@@ -23,24 +23,25 @@ public final class CastCoordinator: ObservableObject {
         chromecastService: ChromecastServiceProtocol = ChromecastService(),
         streamBridge: ChromecastStreamBridgeProtocol = ChromecastStreamBridge(),
         airPlayManager: AirPlayManagerProtocol = AirPlayManager.shared,
-        playbackCoordinator: PlaybackCoordinator = .shared
+        playbackCoordinator: PlaybackCoordinator? = nil
     ) {
         self.chromecastService = chromecastService
         self.streamBridge = streamBridge
         self.airPlayManager = airPlayManager
-        self.playbackCoordinator = playbackCoordinator
+        self.playbackCoordinator = playbackCoordinator ?? PlaybackCoordinator.shared
 
         setupCallbacks()
     }
 
     private func setupCallbacks() {
         chromecastService.onStateChange = { [weak self] state in
-            Task { @MainActor in
-                self?.connectionState = state
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.connectionState = state
                 if case .connected = state {
-                    self?.activeTarget = .chromecast
+                    self.activeTarget = .chromecast
                 } else if case .disconnected = state {
-                    self?.activeTarget = .localDevice
+                    self.activeTarget = .localDevice
                 }
             }
         }

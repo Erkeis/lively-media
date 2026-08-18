@@ -161,10 +161,12 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
             timeObserverToken = nil
         }
         statusObservation?.invalidate()
+        statusObservation = nil
         timeControlStatusObservation?.invalidate()
+        timeControlStatusObservation = nil
         NotificationCenter.default.removeObserver(self)
         player.replaceCurrentItem(with: nil)
-        updateState(.idle)
+        self.state = .idle
     }
 
     deinit {

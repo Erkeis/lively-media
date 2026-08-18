@@ -107,7 +107,7 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
     public func releaseResources() {
         stopSimulationTimer()
         currentItem = nil
-        updateState(.idle)
+        self.state = .idle
     }
 
     deinit {

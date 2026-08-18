@@ -1,12 +1,12 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.9
 // [Intent] Swift Package defining the modular core subsystems for iOS & iPadOS Media Player
 import PackageDescription
 
 let package = Package(
     name: "LivelyMediaCore",
     platforms: [
-        .iOS(.v18),
-        .macOS(.v14)
+        .iOS("17.0"),
+        .macOS("14.0")
     ],
     products: [
         .library(name: "CoreStorage", targets: ["CoreStorage"]),

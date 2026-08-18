@@ -31,8 +31,8 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
     private var statusObservation: NSKeyValueObservation?
     private var timeControlStatusObservation: NSKeyValueObservation?
 
-    public var onStateChange: (@Sendable (PlaybackState) -> Void)?
-    public var onPositionChange: (@Sendable (TimeInterval, TimeInterval) -> Void)?
+    public var onStateChange: (@MainActor @Sendable (PlaybackState) -> Void)?
+    public var onPositionChange: (@MainActor @Sendable (TimeInterval, TimeInterval) -> Void)?
 
     public override init() {
         self.player = AVPlayer()
@@ -49,7 +49,10 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
             let seconds = CMTimeGetSeconds(time)
             if seconds.isFinite {
                 self.currentPosition = seconds
-                self.onPositionChange?(self.currentPosition, self.duration)
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    self.onPositionChange?(self.currentPosition, self.duration)
+                }
             }
         }
 
@@ -138,7 +141,9 @@ public final class AVPlayerAdapter: NSObject, MediaPlayerProtocol, @unchecked Se
 
     private func updateState(_ newState: PlaybackState) {
         self.state = newState
-        onStateChange?(newState)
+        Task { @MainActor [weak self] in
+            self?.onStateChange?(newState)
+        }
     }
 
     public func releaseResources() {

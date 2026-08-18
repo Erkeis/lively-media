@@ -53,42 +53,34 @@ public final class PlaybackCoordinator: ObservableObject {
 
     private func setupEngineCallbacks() {
         avPlayerEngine.onStateChange = { [weak self] newState in
-            Task { @MainActor in
-                self?.state = newState
-                self?.syncNowPlaying()
-            }
+            self?.state = newState
+            self?.syncNowPlaying()
         }
         avPlayerEngine.onPositionChange = { [weak self] pos, dur in
-            Task { @MainActor in
-                self?.currentPosition = pos
-                self?.duration = dur
-                self?.periodicallySavePosition()
-            }
+            self?.currentPosition = pos
+            self?.duration = dur
+            self?.periodicallySavePosition()
         }
 
         ksPlayerEngine.onStateChange = { [weak self] newState in
-            Task { @MainActor in
-                self?.state = newState
-                self?.syncNowPlaying()
-            }
+            self?.state = newState
+            self?.syncNowPlaying()
         }
         ksPlayerEngine.onPositionChange = { [weak self] pos, dur in
-            Task { @MainActor in
-                self?.currentPosition = pos
-                self?.duration = dur
-                self?.periodicallySavePosition()
-            }
+            self?.currentPosition = pos
+            self?.duration = dur
+            self?.periodicallySavePosition()
         }
     }
 
     private func setupRemoteCommands() {
         nowPlayingManager.configureRemoteCommands(
-            onPlay: { [weak self] in Task { @MainActor in self?.play() } },
-            onPause: { [weak self] in Task { @MainActor in self?.pause() } },
-            onToggle: { [weak self] in Task { @MainActor in self?.togglePlayPause() } },
-            onSkipForward: { [weak self] interval in Task { @MainActor in self?.seek(by: interval) } },
-            onSkipBackward: { [weak self] interval in Task { @MainActor in self?.seek(by: -interval) } },
-            onSeek: { [weak self] pos in Task { @MainActor in self?.seek(to: pos) } }
+            onPlay: { [weak self] in self?.play() },
+            onPause: { [weak self] in self?.pause() },
+            onToggle: { [weak self] in self?.togglePlayPause() },
+            onSkipForward: { [weak self] interval in self?.seek(by: interval) },
+            onSkipBackward: { [weak self] interval in self?.seek(by: -interval) },
+            onSeek: { [weak self] pos in self?.seek(to: pos) }
         )
     }
 

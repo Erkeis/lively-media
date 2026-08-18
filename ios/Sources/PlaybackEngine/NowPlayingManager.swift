@@ -13,12 +13,12 @@ public protocol NowPlayingManagerProtocol: AnyObject, Sendable {
     )
     func clearNowPlaying()
     func configureRemoteCommands(
-        onPlay: @escaping @Sendable () -> Void,
-        onPause: @escaping @Sendable () -> Void,
-        onToggle: @escaping @Sendable () -> Void,
-        onSkipForward: @escaping @Sendable (TimeInterval) -> Void,
-        onSkipBackward: @escaping @Sendable (TimeInterval) -> Void,
-        onSeek: @escaping @Sendable (TimeInterval) -> Void
+        onPlay: @escaping @MainActor @Sendable () -> Void,
+        onPause: @escaping @MainActor @Sendable () -> Void,
+        onToggle: @escaping @MainActor @Sendable () -> Void,
+        onSkipForward: @escaping @MainActor @Sendable (TimeInterval) -> Void,
+        onSkipBackward: @escaping @MainActor @Sendable (TimeInterval) -> Void,
+        onSeek: @escaping @MainActor @Sendable (TimeInterval) -> Void
     )
 }
 
@@ -64,60 +64,55 @@ public final class NowPlayingManager: NowPlayingManagerProtocol, @unchecked Send
     }
 
     public func configureRemoteCommands(
-        onPlay: @escaping @Sendable () -> Void,
-        onPause: @escaping @Sendable () -> Void,
-        onToggle: @escaping @Sendable () -> Void,
-        onSkipForward: @escaping @Sendable (TimeInterval) -> Void,
-        onSkipBackward: @escaping @Sendable (TimeInterval) -> Void,
-        onSeek: @escaping @Sendable (TimeInterval) -> Void
+        onPlay: @escaping @MainActor @Sendable () -> Void,
+        onPause: @escaping @MainActor @Sendable () -> Void,
+        onToggle: @escaping @MainActor @Sendable () -> Void,
+        onSkipForward: @escaping @MainActor @Sendable (TimeInterval) -> Void,
+        onSkipBackward: @escaping @MainActor @Sendable (TimeInterval) -> Void,
+        onSeek: @escaping @MainActor @Sendable (TimeInterval) -> Void
     ) {
         #if os(iOS)
         let commandCenter = MPRemoteCommandCenter.shared()
 
         commandCenter.playCommand.isEnabled = true
         commandCenter.playCommand.addTarget { _ in
-            onPlay()
+            Task { @MainActor in onPlay() }
             return .success
         }
 
         commandCenter.pauseCommand.isEnabled = true
         commandCenter.pauseCommand.addTarget { _ in
-            onPause()
+            Task { @MainActor in onPause() }
             return .success
         }
 
         commandCenter.togglePlayPauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.addTarget { _ in
-            onToggle()
+            Task { @MainActor in onToggle() }
             return .success
         }
 
         commandCenter.skipForwardCommand.isEnabled = true
         commandCenter.skipForwardCommand.preferredIntervals = [10]
         commandCenter.skipForwardCommand.addTarget { event in
-            if let skipEvent = event as? MPSkipIntervalCommandEvent {
-                onSkipForward(skipEvent.interval)
-            } else {
-                onSkipForward(10)
-            }
+            let interval: TimeInterval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 10
+            Task { @MainActor in onSkipForward(interval) }
             return .success
         }
 
         commandCenter.skipBackwardCommand.isEnabled = true
         commandCenter.skipBackwardCommand.preferredIntervals = [10]
         commandCenter.skipBackwardCommand.addTarget { event in
-            if let skipEvent = event as? MPSkipIntervalCommandEvent {
-                onSkipBackward(skipEvent.interval)
-            } else {
-                onSkipBackward(10)
-            }
+            let interval: TimeInterval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 10
+            Task { @MainActor in onSkipBackward(interval) }
             return .success
         }
 
         commandCenter.changePlaybackPositionCommand.isEnabled = true
         commandCenter.changePlaybackPositionCommand.addTarget { event in
             if let posEvent = event as? MPChangePlaybackPositionCommandEvent {
-                onSeek(posEvent.positionTime)
+                let pos = posEvent.positionTime
+                Task { @MainActor in onSeek(pos) }
                 return .success
             }
             return .commandFailed

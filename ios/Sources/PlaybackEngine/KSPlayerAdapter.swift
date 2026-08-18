@@ -12,8 +12,8 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
     public private(set) var availableAudioTracks: [TrackOption] = []
     public private(set) var availableSubtitleTracks: [TrackOption] = []
 
-    public var onStateChange: (@Sendable (PlaybackState) -> Void)?
-    public var onPositionChange: (@Sendable (TimeInterval, TimeInterval) -> Void)?
+    public var onStateChange: (@MainActor @Sendable (PlaybackState) -> Void)?
+    public var onPositionChange: (@MainActor @Sendable (TimeInterval, TimeInterval) -> Void)?
 
     private var playbackTimer: Timer?
 
@@ -85,7 +85,10 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
                     self.currentPosition = self.duration
                     self.pause()
                 }
-                self.onPositionChange?(self.currentPosition, self.duration)
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    self.onPositionChange?(self.currentPosition, self.duration)
+                }
             }
         }
     }
@@ -97,7 +100,9 @@ public final class KSPlayerAdapter: MediaPlayerProtocol, @unchecked Sendable {
 
     private func updateState(_ newState: PlaybackState) {
         self.state = newState
-        onStateChange?(newState)
+        Task { @MainActor [weak self] in
+            self?.onStateChange?(newState)
+        }
     }
 
     public func releaseResources() {

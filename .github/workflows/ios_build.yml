@@ -16,27 +16,32 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Select Xcode 16
+      - name: Select Xcode Version
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.0.app || sudo xcode-select -s /Applications/Xcode_15.4.app
+          if [ -d "/Applications/Xcode_16.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app
+          elif [ -d "/Applications/Xcode_16.1.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.1.app
+          elif [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+          fi
           xcodebuild -version
           swift --version
 
-      - name: Run Modular Swift 6 Package Tests
+      - name: Run Modular Swift Package Tests
         run: |
           cd ios
           swift test --enable-code-coverage
 
-      - name: Build Standalone Playgrounds Bundle & Archive
+      - name: Build Modular Release Binaries & Package IPA
         run: |
-          mkdir -p build/Payload
-          cd LivelyMedia.swiftpm
-          swift build -c release --triple arm64-apple-ios18.0-simulator || swift build -c release
+          cd ios
+          swift build -c release
           cd ..
           
           # Create IPA Structure for Sideloadly / AltStore
           mkdir -p build/Payload/LivelyMedia.app
-          cp -R LivelyMedia.swiftpm/* build/Payload/LivelyMedia.app/ || true
+          cp -R LivelyMedia.swiftpm/* build/Payload/LivelyMedia.app/
           cd build
           zip -r LivelyMedia-iOS.ipa Payload
           cd ..

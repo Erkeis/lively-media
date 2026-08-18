@@ -112,7 +112,7 @@ final class DatabaseTests: XCTestCase {
         try await playlistRepo.addMediaToPlaylist(playlistId: playlist.id, mediaId: item2.id)
         try await playlistRepo.addMediaToPlaylist(playlistId: playlist.id, mediaId: item3.id)
 
-        let itemsInPlaylist = try await playlistRepo.fetchMediaItems(in: playlistId: playlist.id)
+        let itemsInPlaylist = try await playlistRepo.fetchMediaItems(in: playlist.id)
         XCTAssertEqual(itemsInPlaylist.count, 3)
         XCTAssertEqual(itemsInPlaylist[0].id, item1.id)
         XCTAssertEqual(itemsInPlaylist[1].id, item2.id)
@@ -120,7 +120,7 @@ final class DatabaseTests: XCTestCase {
 
         // Test Reordering: Reverse order
         try await playlistRepo.reorderPlaylist(playlistId: playlist.id, orderedMediaIds: [item3.id, item2.id, item1.id])
-        let reordered = try await playlistRepo.fetchMediaItems(in: playlistId: playlist.id)
+        let reordered = try await playlistRepo.fetchMediaItems(in: playlist.id)
         XCTAssertEqual(reordered[0].id, item3.id)
         XCTAssertEqual(reordered[1].id, item2.id)
         XCTAssertEqual(reordered[2].id, item1.id)

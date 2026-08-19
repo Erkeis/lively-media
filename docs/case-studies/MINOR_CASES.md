@@ -172,3 +172,72 @@ Built a responsive 10-band graphic equalizer (32Hz to 16kHz) featuring:
 - **6 Master Presets**: Studio Flat, Bass Boost, Vocal, Acoustic, Rock, Cinema.
 - **Normalized dB Range**: `-12.0 dB` to `+12.0 dB` with real-time dB gain readouts.
 - **Interactive Drag Gestures**: Vertical touch scrubbers with center notch snap (`0.0 dB`) and UI impact haptics.
+
+---
+
+## Case m-08: Non-Exhaustive Switch on Non-Frozen System Enums (`NWEndpoint`, `NWConnection.State`)
+
+### 1. Metadata
+- **Subsystem**: `CastEngine` (`ChromecastService.swift`), `Playgrounds App` (`App.swift`)
+- **Category**: Compiler Exhaustiveness & System Framework Evolution (Swift 6)
+
+### 2. Root Cause
+In Swift 6 mode, pattern matching over non-frozen enums in Apple's `Network` framework (`NWEndpoint`, `NWConnection.State`, `NWEndpoint.Host`) produces compilation errors when system cases (`.unix`, `.url`, `.opaque`, `.waiting`) or future unannounced cases are not handled.
+
+### 3. Resolution
+Added exhaustive pattern matching with `@unknown default` fallback across all endpoint inspection sites in both `CastEngine` and `LivelyMedia.swiftpm`:
+
+```swift
+switch result.endpoint {
+case .service(let serviceName, _, _, _):
+    name = serviceName
+    deviceId = serviceName
+case .hostPort(let host, let hostPort):
+    name = "\(host)"
+    deviceId = "\(host)"
+    port = hostPort.rawValue
+    switch host {
+    case .ipv4(let ip): ipAddress = "\(ip)"
+    case .ipv6(let ip): ipAddress = "\(ip)"
+    case .name(let hostName, _): ipAddress = hostName
+    @unknown default: break
+    }
+case .unix(let path):
+    name = "Unix Socket"
+    deviceId = path
+case .url(let url):
+    name = url.absoluteString
+    deviceId = url.absoluteString
+case .opaque:
+    name = "Opaque Endpoint"
+    deviceId = UUID().uuidString
+@unknown default:
+    break
+}
+```
+
+---
+
+## Case m-09: Inter-Module Model DTO Property Symmetry & Computed Accessors
+
+### 1. Metadata
+- **Subsystem**: `CastEngine` (`CastV2Protocol.swift`), `Playgrounds App` (`App.swift`), `CastEngineTests`
+- **Category**: API Ergonomics, DTO Parity & Test Assertions
+
+### 2. Root Cause
+`CastMediaInfo` encapsulates title and subtitle within nested `metadata: CastMediaMetadata?`. Direct property queries like `media?.title` failed compilation while `media?.metadata?.title` was required. Standalone Playgrounds and Core package models needed symmetrical ergonomics.
+
+### 3. Resolution
+Added computed convenience accessors on `CastMediaInfo` across all modular packages and updated test suites to validate both direct and nested paths:
+
+```swift
+public extension CastMediaInfo {
+    var title: String? {
+        metadata?.title
+    }
+
+    var subtitle: String? {
+        metadata?.subtitle
+    }
+}
+```

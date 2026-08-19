@@ -20,6 +20,7 @@ graph TD
     Major --> M4["M-04: Swift Playgrounds vs CLI Package Isolation"]
     Major --> M5["M-05: 4K HDR Dynamic Buffer & Cache Management"]
     Major --> M6["M-06: Local Network Chromecast HTTP 206 Bridge"]
+    Major --> M7["M-07: Swift 6 Concurrency & Continuation Closure Safety"]
 
     Minor --> m1["m-01: FlyingFox Async API Breaking Changes"]
     Minor --> m2["m-02: macOS Cross-Platform fullScreenCover Fallback"]
@@ -28,6 +29,8 @@ graph TD
     Minor --> m5["m-05: Swift Tools Version Compatibility on Runners"]
     Minor --> m6["m-06: AVRoutePickerView Custom Overlay Integration"]
     Minor --> m7["m-07: 10-Band EQ Curve & Haptic Scrubber Math"]
+    Minor --> m8["m-08: Non-Exhaustive Switch on Network Enums"]
+    Minor --> m9["m-09: Inter-Module Model DTO Property Symmetry"]
 ```
 
 ---
@@ -43,6 +46,7 @@ graph TD
 | **[M-04](MAJOR_CASES.md#case-m-04-swift-playgrounds-appleproducttypes-vs-cli-build-disconnect)** | `CI/CD`, `Playgrounds` | `AppleProductTypes` module import failure during pure CLI `swift build` | Separated modular compilation (`ios/`) from Playgrounds artifact packaging |
 | **[M-05](MAJOR_CASES.md#case-m-05-4k-hevc-hdr-live-buffering--dynamic-stream-cache-invalidation)** | `PlaybackEngine`, `Playgrounds` | 4K HEVC sample buffering stalls caused by stale Google Storage session tokens | Switched to Apple CDN 4K HEVC master playlists with automatic cache flushing |
 | **[M-06](MAJOR_CASES.md#case-m-06-chromecast-sandbox-bypass-via-embedded-http-range-206-bridge)** | `CastEngine`, `TransferServer` | Chromecast inability to access local sandboxed media files directly | Designed reverse streaming HTTP bridge responding with chunked `206 Partial Content` |
+| **[M-07](MAJOR_CASES.md#case-m-07-swift-6-strict-concurrency-closure-mutable-captures--continuation-safety)** | `CastEngine`, `Tests` | Swift 6 strict concurrency errors on `hasResumed` and test closure captures | Implemented `nonisolated(unsafe)` + `NSLock` synchronization and lock-guarded connections |
 
 ---
 
@@ -56,6 +60,8 @@ graph TD
 | **[m-05](MINOR_CASES.md#case-m-05-swift-tools-version-mismatch-on-github-actions-runner)** | `CI/CD` | Swift 6.0.0 tools version rejected on Xcode 15.4 / Swift 5.10 runners | Set tools version to `5.9` with `.iOS("17.0")` for maximum cross-runner compatibility |
 | **[m-06](MINOR_CASES.md#case-m-06-airplay-2-native-avroutepickerview-glassmorphism-integration)** | `PlayerUI` | Standard AirPlay button styling clashing with dark Obsidian theme | Wrapped `AVRoutePickerView` in `UIViewRepresentable` with custom tint overrides |
 | **[m-07](MINOR_CASES.md#case-m-07-10-band-equalizer-preset-curve-synthesis--haptic-scrubbers)** | `PlayerUI` | Vertical touch slider precision and dB gain scaling responsiveness | Implemented normalized -12dB ~ +12dB mapping with master preset curves |
+| **[m-08](MINOR_CASES.md#case-m-08-non-exhaustive-switch-on-non-frozen-system-enums-nwendpoint-nwconnectionstate)** | `CastEngine`, `Playgrounds` | Non-exhaustive `switch result.endpoint` compiler warnings/errors | Added `.unix`, `.url`, `.opaque`, and `@unknown default` exhaustive matching |
+| **[m-09](MINOR_CASES.md#case-m-09-inter-module-model-dto-property-symmetry--computed-accessors)** | `CastEngine`, `Playgrounds` | `CastMediaInfo.title` property query compilation failure | Added computed convenience accessors `title` and `subtitle` on DTO extensions |
 
 ---
 

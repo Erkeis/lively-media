@@ -21,4 +21,5 @@
 
 ## 4. VERIFICATION & PRE-COMPLETION GATES
 - Verify all changes before asserting completion. Run unit tests for metadata parsing, stream chunking, and database queries.
+- Before committing, pass Swift 6 stability preflight checks against `docs/case-studies/KA_SWIFT_STABILITY.md` (concurrency isolation, enum exhaustiveness, and DTO symmetry).
 - Before committing significant architecture changes, update relevant documents under `docs/`.

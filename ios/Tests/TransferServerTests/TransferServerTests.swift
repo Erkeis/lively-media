@@ -22,4 +22,13 @@ final class TransferServerTests: XCTestCase {
         XCTAssertEqual(payload.port, 8080)
         XCTAssertTrue(payload.connectionURLString.hasPrefix("http://"))
     }
+
+    func testWebTransferServerInitialization() {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let server = WebTransferServer(port: 8088, targetDirectory: tempDir)
+        XCTAssertNotNil(server)
+    }
 }

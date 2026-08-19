@@ -485,6 +485,174 @@ final class CastEngineTests: XCTestCase {
         XCTAssertEqual(coordinator.activeTarget, .localDevice)
         XCTAssertNil(coordinator.currentMediaStatus)
     }
+
+    // MARK: - Extended Protocol & Error Handling Tests
+
+    func testCastHeartbeatAndLifecycleCommandsSerialization() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+
+        // 1. CONNECT & CLOSE
+        let connectCmd = CastConnectCommand(package: "com.livelymedia")
+        let connectData = try encoder.encode(connectCmd)
+        let decodedConnect = try decoder.decode(CastConnectCommand.self, from: connectData)
+        XCTAssertEqual(decodedConnect.type, "CONNECT")
+        XCTAssertEqual(decodedConnect.package, "com.livelymedia")
+
+        let closeCmd = CastCloseCommand()
+        let closeData = try encoder.encode(closeCmd)
+        let decodedClose = try decoder.decode(CastCloseCommand.self, from: closeData)
+        XCTAssertEqual(decodedClose.type, "CLOSE")
+
+        // 2. PING & PONG
+        let pingCmd = CastPingCommand()
+        let pingData = try encoder.encode(pingCmd)
+        let decodedPing = try decoder.decode(CastPingCommand.self, from: pingData)
+        XCTAssertEqual(decodedPing.type, "PING")
+
+        let pongCmd = CastPongCommand()
+        let pongData = try encoder.encode(pongCmd)
+        let decodedPong = try decoder.decode(CastPongCommand.self, from: pongData)
+        XCTAssertEqual(decodedPong.type, "PONG")
+
+        // 3. LAUNCH, GET_STATUS, STOP
+        let launchCmd = CastLaunchCommand(requestId: 10, appId: CastV2AppId.defaultMediaReceiver)
+        let launchData = try encoder.encode(launchCmd)
+        let decodedLaunch = try decoder.decode(CastLaunchCommand.self, from: launchData)
+        XCTAssertEqual(decodedLaunch.type, "LAUNCH")
+        XCTAssertEqual(decodedLaunch.appId, "CC1AD845")
+
+        let getStatusCmd = CastReceiverGetStatusCommand(requestId: 11)
+        let getStatusData = try encoder.encode(getStatusCmd)
+        let decodedGetStatus = try decoder.decode(CastReceiverGetStatusCommand.self, from: getStatusData)
+        XCTAssertEqual(decodedGetStatus.type, "GET_STATUS")
+
+        let stopCmd = CastReceiverStopCommand(requestId: 12, sessionId: "session-99")
+        let stopData = try encoder.encode(stopCmd)
+        let decodedStop = try decoder.decode(CastReceiverStopCommand.self, from: stopData)
+        XCTAssertEqual(decodedStop.type, "STOP")
+        XCTAssertEqual(decodedStop.sessionId, "session-99")
+
+        let mediaStatusCmd = CastMediaGetStatusCommand(requestId: 13, mediaSessionId: 5)
+        let mediaStatusData = try encoder.encode(mediaStatusCmd)
+        let decodedMediaStatus = try decoder.decode(CastMediaGetStatusCommand.self, from: mediaStatusData)
+        XCTAssertEqual(decodedMediaStatus.type, "GET_STATUS")
+        XCTAssertEqual(decodedMediaStatus.mediaSessionId, 5)
+    }
+
+    func testCastFramerConvenienceEncoders() throws {
+        let text = "{\"type\":\"PING\"}"
+        let framedString = CastV2Framer.encodeFramedString(text)
+        XCTAssertEqual(framedString.count, 4 + text.utf8.count)
+
+        var buffer = framedString
+        let decoded = CastV2Framer.decodeFramedMessage(from: &buffer)
+        XCTAssertNotNil(decoded)
+        XCTAssertEqual(String(data: decoded!, encoding: .utf8), text)
+
+        let ping = CastPingCommand()
+        let framedJSON = try CastV2Framer.encodeFramedJSON(ping)
+        XCTAssertTrue(framedJSON.count > 4)
+
+        var jsonBuffer = framedJSON
+        let decodedJSONData = CastV2Framer.decodeFramedMessage(from: &jsonBuffer)
+        XCTAssertNotNil(decodedJSONData)
+        let decodedPing = try JSONDecoder().decode(CastPingCommand.self, from: decodedJSONData!)
+        XCTAssertEqual(decodedPing.type, "PING")
+    }
+
+    func testAirPlayManagerDefaultValues() {
+        let manager = AirPlayManager.shared
+        // Default headless/CI environment
+        XCTAssertFalse(manager.isAirPlayActive)
+    }
+
+    func testChromecastStreamBridgeVariousFormats() {
+        let bridge = ChromecastStreamBridge()
+
+        let formats: [(ext: String, mime: String, type: MediaType)] = [
+            ("mp4", "video/mp4", .video),
+            ("mov", "video/mp4", .video),
+            ("mkv", "video/webm", .video),
+            ("webm", "video/webm", .video),
+            ("mp3", "audio/mpeg", .audio),
+            ("flac", "audio/flac", .audio),
+            ("aac", "audio/aac", .audio),
+            ("m4a", "audio/aac", .audio),
+            ("xyz", "video/mp4", .video)
+        ]
+
+        for item in formats {
+            let media = MediaItem(
+                title: "Sample \(item.ext)",
+                filePath: "/media/sample.\(item.ext)",
+                fileName: "sample.\(item.ext)",
+                fileSize: 1024,
+                duration: 60.0,
+                mediaType: item.type,
+                containerFormat: item.ext
+            )
+            let payload = bridge.generateCastPayload(for: media, serverPort: 8080, customHost: "192.168.1.100")
+            XCTAssertEqual(payload.contentType, item.mime)
+            XCTAssertEqual(payload.streamURL.absoluteString, "http://192.168.1.100:8080/stream/sample.\(item.ext)")
+        }
+    }
+
+    func testChromecastServiceNotConnectedErrorHandling() async {
+        let service = ChromecastService(isMockMode: false, fallbackToMockDevices: false)
+        XCTAssertEqual(service.connectionState, .disconnected)
+
+        do {
+            try await service.play()
+            XCTFail("play() must throw CastError.notConnected when disconnected")
+        } catch let error as CastError {
+            XCTAssertEqual(error, .notConnected)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+
+        do {
+            try await service.pause()
+            XCTFail("pause() must throw CastError.notConnected when disconnected")
+        } catch let error as CastError {
+            XCTAssertEqual(error, .notConnected)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+
+        do {
+            try await service.stop()
+            XCTFail("stop() must throw CastError.notConnected when disconnected")
+        } catch let error as CastError {
+            XCTAssertEqual(error, .notConnected)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+
+        do {
+            try await service.seek(to: 10.0)
+            XCTFail("seek() must throw CastError.notConnected when disconnected")
+        } catch let error as CastError {
+            XCTAssertEqual(error, .notConnected)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+
+        let payload = CastMediaPayload(
+            streamURL: URL(string: "http://127.0.0.1:8080/stream/test.mp4")!,
+            contentType: "video/mp4",
+            title: "Test",
+            duration: 100.0
+        )
+        do {
+            try await service.loadMedia(payload: payload)
+            XCTFail("loadMedia() must throw CastError.notConnected when disconnected")
+        } catch let error as CastError {
+            XCTAssertEqual(error, .notConnected)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
 }
 
 

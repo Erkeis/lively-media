@@ -21,10 +21,10 @@
 - Modify: `docs/case-studies/MAJOR_CASES.md`
 - Modify: `docs/NON_MAC_TEST_GUIDE.md`
 
-- [ ] **Step 1: Update ARCHITECTURE.md with Pure-Swift Cast V2 & Range Server specification**
-- [ ] **Step 2: Add Case M-07 to MAJOR_CASES.md detailing binary SDK constraints and pure-Swift solution**
-- [ ] **Step 3: Update NON_MAC_TEST_GUIDE.md with real Chromecast live test checklist**
-- [ ] **Step 4: Commit documentation changes**
+- [x] **Step 1: Update ARCHITECTURE.md with Pure-Swift Cast V2 & Range Server specification**
+- [x] **Step 2: Add Case M-07 to MAJOR_CASES.md detailing binary SDK constraints and pure-Swift solution**
+- [x] **Step 3: Update NON_MAC_TEST_GUIDE.md with real Chromecast live test checklist**
+- [x] **Step 4: Commit documentation changes**
 
 ```bash
 git add docs/ARCHITECTURE.md docs/case-studies/MAJOR_CASES.md docs/NON_MAC_TEST_GUIDE.md
@@ -59,11 +59,11 @@ git commit -m "feat(CastEngine): add Cast V2 message framing and payload models"
 - Modify: `ios/Sources/CastEngine/CastCoordinator.swift`
 - Test: `ios/Tests/CastEngineTests/CastEngineTests.swift`
 
-- [ ] **Step 1: Write unit tests for ChromecastService with mock and network discovery delegates**
-- [ ] **Step 2: Implement NWBrowser mDNS scanner for `_googlecast._tcp` and NWConnection TLS :8009 client**
-- [ ] **Step 3: Connect CastCoordinator with active session handling and error state propagation**
-- [ ] **Step 4: Verify test suite execution**
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Write unit tests for ChromecastService with mock and network discovery delegates**
+- [x] **Step 2: Implement NWBrowser mDNS scanner for `_googlecast._tcp` and NWConnection TLS :8009 client**
+- [x] **Step 3: Connect CastCoordinator with active session handling and error state propagation**
+- [x] **Step 4: Verify test suite execution**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ios/Sources/CastEngine/ChromecastService.swift ios/Sources/CastEngine/CastCoordinator.swift ios/Tests/CastEngineTests/CastEngineTests.swift
@@ -77,10 +77,10 @@ git commit -m "feat(CastEngine): implement real mDNS discovery and TLS socket cl
 **Files:**
 - Modify: `LivelyMedia.swiftpm/App.swift`
 
-- [ ] **Step 1: Implement embedded NWListener HTTP 206 Range Streaming Server in App.swift**
-- [ ] **Step 2: Connect real-time NWBrowser discovery and Cast V2 control sheet in App.swift UI**
-- [ ] **Step 3: Verify Swift Playgrounds syntax compatibility and standalone execution**
-- [ ] **Step 4: Commit**
+- [x] **Step 1: Implement embedded NWListener HTTP 206 Range Streaming Server in App.swift**
+- [x] **Step 2: Connect real-time NWBrowser discovery and Cast V2 control sheet in App.swift UI**
+- [x] **Step 3: Verify Swift Playgrounds syntax compatibility and standalone execution**
+- [x] **Step 4: Commit**
 
 ```bash
 git add LivelyMedia.swiftpm/App.swift
@@ -96,10 +96,10 @@ git commit -m "feat(Playgrounds): embed native NWListener HTTP 206 range server 
 - Test: `ios/Tests/TransferServerTests/TransferServerTests.swift`
 - Test: `ios/Tests/PlayerUITests/PlayerUITests.swift`
 
-- [ ] **Step 1: Run complete unit test suite across all 11 modules**
-- [ ] **Step 2: Verify zero concurrency warnings under Swift 6 strict concurrency**
-- [ ] **Step 3: Verify GitHub Actions CI workflow script consistency**
-- [ ] **Step 4: Commit final verification adjustments**
+- [x] **Step 1: Run complete unit test suite across all 11 modules**
+- [x] **Step 2: Verify zero concurrency warnings under Swift 6 strict concurrency**
+- [x] **Step 3: Verify GitHub Actions CI workflow script consistency**
+- [x] **Step 4: Commit final verification adjustments**
 
 ```bash
 git add .

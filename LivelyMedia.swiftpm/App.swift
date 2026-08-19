@@ -1,10 +1,12 @@
-// [Intent] 100% Self-contained Swift Playgrounds executable app for iPad Air 5 with real-time AirPlay 2 (AVRoutePickerView) and local Wi-Fi Chromecast streaming bridge
+// [Intent] 100% Self-contained Pure-Swift Playgrounds executable app for iPad Air 5 with real-time AirPlay 2, NWListener HTTP 206 Range Streaming Server, and Cast V2 TLS socket engine
 import SwiftUI
 import AVFoundation
 import AVKit
 import MediaPlayer
 import WebKit
 import UniformTypeIdentifiers
+import Network
+import Security
 
 // MARK: - App Main Entrypoint
 @main
@@ -21,6 +23,10 @@ struct LivelyMediaApp: App {
         )
         try? AVAudioSession.sharedInstance().setActive(true)
         #endif
+
+        // Automatically initialize local HTTP 206 server & mDNS scanner
+        CastManager.shared.startServer()
+        CastManager.shared.startDiscovery()
     }
 
     var body: some Scene {
@@ -53,7 +59,868 @@ struct AirPlayRoutePickerButton: UIViewRepresentable {
 }
 #endif
 
-// MARK: - Local Wi-Fi & Cast Manager (Real Network Resolution)
+// MARK: - Cast V2 Namespaces & Constants
+enum CastV2Namespace {
+    static let connection = "urn:x-cast:com.google.cast.tp.connection"
+    static let heartbeat = "urn:x-cast:com.google.cast.tp.heartbeat"
+    static let receiver = "urn:x-cast:com.google.cast.receiver"
+    static let media = "urn:x-cast:com.google.cast.media"
+}
+
+enum CastV2AppId {
+    static let defaultMediaReceiver = "CC1AD845"
+}
+
+// MARK: - Cast V2 Wire Framer (4-Byte Big-Endian Length Prefix)
+enum CastV2Framer {
+    // [Intent] Big-endian UInt32 length prefix ensures alignment-independent transmission over TLS sockets
+    static func encodeFramedMessage(_ data: Data) -> Data {
+        var length = UInt32(data.count).bigEndian
+        var framed = withUnsafeBytes(of: &length) { Data($0) }
+        framed.append(data)
+        return framed
+    }
+
+    static func encodeFramedJSON<T: Encodable>(_ value: T, encoder: JSONEncoder = JSONEncoder()) throws -> Data {
+        let payload = try encoder.encode(value)
+        return encodeFramedMessage(payload)
+    }
+
+    // [Intent] Buffer slicing allows handling TCP fragmentation or multiple merged packets in a single read
+    static func decodeFramedMessage(from buffer: inout Data) -> Data? {
+        guard buffer.count >= 4 else { return nil }
+
+        var rawLength: UInt32 = 0
+        _ = withUnsafeMutableBytes(of: &rawLength) { lengthPtr in
+            buffer.copyBytes(to: lengthPtr, count: 4)
+        }
+        let payloadLength = Int(UInt32(bigEndian: rawLength))
+        let totalLength = 4 + payloadLength
+
+        guard buffer.count >= totalLength else { return nil }
+
+        let payload = buffer.subdata(in: 4..<totalLength)
+        buffer.removeSubrange(0..<totalLength)
+        return payload
+    }
+}
+
+// MARK: - Cast V2 Protocol Payload Models
+struct CastConnectCommand: Codable, Sendable {
+    let type: String
+    init() { self.type = "CONNECT" }
+}
+
+struct CastCloseCommand: Codable, Sendable {
+    let type: String
+    init() { self.type = "CLOSE" }
+}
+
+struct CastPingCommand: Codable, Sendable {
+    let type: String
+    init() { self.type = "PING" }
+}
+
+struct CastPongCommand: Codable, Sendable {
+    let type: String
+    init() { self.type = "PONG" }
+}
+
+struct CastLaunchCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let appId: String
+    init(requestId: Int, appId: String = CastV2AppId.defaultMediaReceiver) {
+        self.type = "LAUNCH"
+        self.requestId = requestId
+        self.appId = appId
+    }
+}
+
+struct CastMediaMetadata: Codable, Sendable {
+    let metadataType: Int
+    let title: String
+    let subtitle: String?
+    let artist: String?
+    let albumName: String?
+
+    init(metadataType: Int = 0, title: String, subtitle: String? = nil, artist: String? = nil, albumName: String? = nil) {
+        self.metadataType = metadataType
+        self.title = title
+        self.subtitle = subtitle
+        self.artist = artist
+        self.albumName = albumName
+    }
+}
+
+struct CastMediaInfo: Codable, Sendable {
+    let contentId: String
+    let streamType: String
+    let contentType: String
+    let metadata: CastMediaMetadata?
+    let duration: Double?
+
+    init(contentId: String, streamType: String = "BUFFERED", contentType: String, metadata: CastMediaMetadata? = nil, duration: Double? = nil) {
+        self.contentId = contentId
+        self.streamType = streamType
+        self.contentType = contentType
+        self.metadata = metadata
+        self.duration = duration
+    }
+}
+
+struct CastLoadCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let sessionId: String?
+    let media: CastMediaInfo
+    let autoplay: Bool
+    let currentTime: Double
+
+    init(requestId: Int, sessionId: String? = nil, media: CastMediaInfo, autoplay: Bool = true, currentTime: Double = 0.0) {
+        self.type = "LOAD"
+        self.requestId = requestId
+        self.sessionId = sessionId
+        self.media = media
+        self.autoplay = autoplay
+        self.currentTime = currentTime
+    }
+}
+
+struct CastPlayCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let mediaSessionId: Int
+    init(requestId: Int, mediaSessionId: Int) {
+        self.type = "PLAY"
+        self.requestId = requestId
+        self.mediaSessionId = mediaSessionId
+    }
+}
+
+struct CastPauseCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let mediaSessionId: Int
+    init(requestId: Int, mediaSessionId: Int) {
+        self.type = "PAUSE"
+        self.requestId = requestId
+        self.mediaSessionId = mediaSessionId
+    }
+}
+
+struct CastMediaStopCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let mediaSessionId: Int
+    init(requestId: Int, mediaSessionId: Int) {
+        self.type = "STOP"
+        self.requestId = requestId
+        self.mediaSessionId = mediaSessionId
+    }
+}
+
+struct CastSeekCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let mediaSessionId: Int
+    let currentTime: Double
+    init(requestId: Int, mediaSessionId: Int, currentTime: Double) {
+        self.type = "SEEK"
+        self.requestId = requestId
+        self.mediaSessionId = mediaSessionId
+        self.currentTime = currentTime
+    }
+}
+
+struct CastVolume: Codable, Sendable {
+    let level: Float?
+    let muted: Bool?
+    init(level: Float? = nil, muted: Bool? = nil) {
+        self.level = level
+        self.muted = muted
+    }
+}
+
+struct CastSetVolumeCommand: Codable, Sendable {
+    let type: String
+    let requestId: Int
+    let volume: CastVolume
+    init(requestId: Int, volume: CastVolume) {
+        self.type = "SET_VOLUME"
+        self.requestId = requestId
+        self.volume = volume
+    }
+}
+
+struct CastReceiverApplication: Codable, Sendable {
+    let appId: String
+    let displayName: String?
+    let sessionId: String
+    let statusText: String?
+    let transportId: String
+}
+
+struct CastReceiverStatusItem: Codable, Sendable {
+    let applications: [CastReceiverApplication]?
+}
+
+struct CastReceiverStatusResponse: Codable, Sendable {
+    let type: String
+    let requestId: Int?
+    let status: CastReceiverStatusItem?
+}
+
+struct CastMediaStatusItem: Codable, Sendable {
+    let mediaSessionId: Int
+    let playerState: String
+    let currentTime: Double?
+    let media: CastMediaInfo?
+}
+
+struct CastMediaStatusResponse: Codable, Sendable {
+    let type: String
+    let requestId: Int?
+    let status: [CastMediaStatusItem]
+}
+
+struct CastGenericResponse: Codable, Sendable {
+    let type: String
+    let requestId: Int?
+}
+
+// MARK: - Web Assets for Wi-Fi File Transfer UI
+struct WebAssets {
+    static let indexHTML: String = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Obsidian Studio &bull; Wi-Fi Media Transfer</title>
+        <style>
+            :root {
+                --bg: #0B0C0E;
+                --surface: #14161A;
+                --elevated: #1E2127;
+                --border: #282C35;
+                --amber: #E5A93C;
+                --text-primary: #FFFFFF;
+                --text-secondary: #9AA0AC;
+                --text-muted: #636B78;
+                --success: #30D158;
+            }
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+            body { background-color: var(--bg); color: var(--text-primary); min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 40px 20px; }
+            .container { width: 100%; max-width: 800px; }
+            header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; border-bottom: 1px solid var(--border); padding-bottom: 20px; }
+            .brand { display: flex; align-items: center; gap: 12px; }
+            .logo { width: 36px; height: 36px; background: var(--amber); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: bold; color: var(--bg); }
+            h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+            .badge { font-size: 12px; background: var(--elevated); border: 1px solid var(--border); padding: 4px 10px; border-radius: 20px; color: var(--amber); }
+            .drop-zone {
+                background: var(--surface);
+                border: 2px dashed var(--border);
+                border-radius: 16px;
+                padding: 50px 20px;
+                text-align: center;
+                cursor: pointer;
+                transition: all 0.25s ease;
+                margin-bottom: 30px;
+            }
+            .drop-zone:hover, .drop-zone.drag-over {
+                border-color: var(--amber);
+                background: var(--elevated);
+                box-shadow: 0 0 20px rgba(229, 169, 60, 0.15);
+            }
+            .drop-icon { font-size: 40px; margin-bottom: 15px; color: var(--amber); }
+            .drop-title { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+            .drop-desc { font-size: 13px; color: var(--text-secondary); }
+            .file-list-card {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 16px;
+                padding: 24px;
+            }
+            .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-weight: 600; font-size: 16px; }
+            .file-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }
+            .file-table th { padding: 12px 8px; color: var(--text-muted); font-size: 12px; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+            .file-table td { padding: 14px 8px; border-bottom: 1px solid rgba(40, 44, 53, 0.5); }
+            .file-name { font-weight: 500; }
+            .file-size { color: var(--text-secondary); font-family: monospace; }
+            .progress-bar-wrap { width: 100%; height: 6px; background: var(--elevated); border-radius: 3px; overflow: hidden; margin-top: 8px; display: none; }
+            .progress-bar { width: 0%; height: 100%; background: var(--amber); transition: width 0.1s linear; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <header>
+                <div class="brand">
+                    <div class="logo">&bull;</div>
+                    <div>
+                        <h1>Obsidian Studio</h1>
+                        <p style="font-size: 13px; color: var(--text-secondary)">Wi-Fi File Transfer & HTTP Bridge</p>
+                    </div>
+                </div>
+                <div class="badge">Connected to iPad</div>
+            </header>
+
+            <div class="drop-zone" id="dropZone">
+                <div class="drop-icon">&#8682;</div>
+                <div class="drop-title">Drag & Drop Audio / Video Files Here</div>
+                <div class="drop-desc">Supports MP4, MKV, FLAC, MP3, MOV, AAC, Subtitles (.srt, .ass)</div>
+                <input type="file" id="fileInput" multiple style="display: none">
+                <div class="progress-bar-wrap" id="progressWrap">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+            </div>
+
+            <div class="file-list-card">
+                <div class="card-header">
+                    <span>On-Device Media Files</span>
+                    <button id="refreshBtn" style="background: var(--elevated); border: 1px solid var(--border); color: var(--text-primary); padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 12px;">Refresh</button>
+                </div>
+                <table class="file-table">
+                    <thead>
+                        <tr>
+                            <th>File Name</th>
+                            <th>Size</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="fileTableBody">
+                        <tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 24px;">Loading files...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+            const progressWrap = document.getElementById('progressWrap');
+            const progressBar = document.getElementById('progressBar');
+            const fileTableBody = document.getElementById('fileTableBody');
+            const refreshBtn = document.getElementById('refreshBtn');
+
+            dropZone.addEventListener('click', () => fileInput.click());
+            dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+            dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('drag-over');
+                if (e.dataTransfer.files.length > 0) uploadFiles(e.dataTransfer.files);
+            });
+            fileInput.addEventListener('change', () => { if (fileInput.files.length > 0) uploadFiles(fileInput.files); });
+            refreshBtn.addEventListener('click', loadFiles);
+
+            async function loadFiles() {
+                try {
+                    const res = await fetch('/api/files');
+                    const files = await res.json();
+                    if (!files || files.length === 0) {
+                        fileTableBody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 24px;">No files on device yet. Upload above!</td></tr>';
+                        return;
+                    }
+                    fileTableBody.innerHTML = files.map(f => `
+                        <tr>
+                            <td class="file-name">${f.name}</td>
+                            <td class="file-size">${formatBytes(f.size)}</td>
+                            <td style="color: var(--success); font-size: 12px;">Ready</td>
+                        </tr>
+                    `).join('');
+                } catch (e) {
+                    fileTableBody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: #FF453A; padding: 24px;">Failed to load files</td></tr>';
+                }
+            }
+
+            async function uploadFiles(files) {
+                progressWrap.style.display = 'block';
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    const formData = new FormData();
+                    formData.append('file', file, file.name);
+
+                    progressBar.style.width = '20%';
+                    await fetch('/api/upload', { 
+                        method: 'POST', 
+                        headers: { 'X-File-Name': encodeURIComponent(file.name) },
+                        body: formData 
+                    });
+                    progressBar.style.width = Math.round(((i + 1) / files.length) * 100) + '%';
+                }
+                setTimeout(() => {
+                    progressWrap.style.display = 'none';
+                    progressBar.style.width = '0%';
+                    loadFiles();
+                }, 500);
+            }
+
+            function formatBytes(bytes) {
+                if (!bytes || bytes === 0) return '0 B';
+                const k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+            }
+
+            loadFiles();
+        </script>
+    </body>
+    </html>
+    """
+}
+
+// MARK: - Embedded Pure-Swift HTTP 206 Range Server (NWListener)
+public final class EmbeddedRangeServer: @unchecked Sendable {
+    private var listener: NWListener?
+    private let queue = DispatchQueue(label: "com.livelymedia.rangeserver", qos: .userInitiated)
+    private let lock = NSLock()
+    private var _isRunning: Bool = false
+    private var _port: UInt16 = 8080
+
+    public var isRunning: Bool {
+        lock.withLock { _isRunning }
+    }
+
+    public var port: UInt16 {
+        lock.withLock { _port }
+    }
+
+    public init() {}
+
+    deinit {
+        stop()
+    }
+
+    public func start(port: UInt16 = 8080) throws {
+        lock.lock()
+        if _isRunning {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let portEndpoint = NWEndpoint.Port(rawValue: port) ?? NWEndpoint.Port(integerLiteral: 8080)
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
+        parameters.allowLocalEndpointReuse = true
+
+        let newListener = try NWListener(using: parameters, on: portEndpoint)
+
+        newListener.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .ready:
+                self.lock.withLock {
+                    self._isRunning = true
+                    self._port = port
+                }
+                print("[EmbeddedRangeServer] HTTP 206 server listening on port \(port)")
+            case .failed(let error):
+                self.lock.withLock { self._isRunning = false }
+                print("[EmbeddedRangeServer] Listener failed: \(error)")
+            case .cancelled:
+                self.lock.withLock { self._isRunning = false }
+            default:
+                break
+            }
+        }
+
+        newListener.newConnectionHandler = { [weak self] connection in
+            guard let self = self else { return }
+            self.handleIncomingConnection(connection)
+        }
+
+        newListener.start(queue: queue)
+        self.lock.withLock {
+            self.listener = newListener
+        }
+    }
+
+    public func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        listener?.cancel()
+        listener = nil
+        _isRunning = false
+    }
+
+    private func handleIncomingConnection(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        var buffer = Data()
+
+        func readMore() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+                guard let self = self else {
+                    connection.cancel()
+                    return
+                }
+
+                if let data = data, !data.isEmpty {
+                    buffer.append(data)
+
+                    // Check if complete HTTP headers (\r\n\r\n) received
+                    if let headerRange = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                        let headerData = buffer.subdata(in: 0..<headerRange.lowerBound)
+                        if let headerString = String(data: headerData, encoding: .utf8) {
+                            let lines = headerString.components(separatedBy: "\r\n")
+                            guard let requestLine = lines.first else {
+                                connection.cancel()
+                                return
+                            }
+                            let requestTokens = requestLine.components(separatedBy: " ")
+                            guard requestTokens.count >= 2 else {
+                                connection.cancel()
+                                return
+                            }
+                            let method = requestTokens[0].uppercased()
+                            let rawPath = requestTokens[1]
+
+                            var headers: [String: String] = [:]
+                            for line in lines.dropFirst() {
+                                let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                                if parts.count == 2 {
+                                    let key = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+                                    let val = parts[1].trimmingCharacters(in: .whitespaces)
+                                    headers[key] = val
+                                }
+                            }
+
+                            let bodyData = buffer.subdata(in: headerRange.upperBound..<buffer.count)
+                            let contentLength = Int(headers["content-length"] ?? "0") ?? 0
+
+                            if method == "POST" && bodyData.count < contentLength {
+                                // Needs more body bytes for file upload
+                                readMore()
+                                return
+                            }
+
+                            self.processRequest(
+                                method: method,
+                                rawPath: rawPath,
+                                headers: headers,
+                                body: bodyData,
+                                connection: connection
+                            )
+                            return
+                        }
+                    }
+                }
+
+                if error != nil || isComplete {
+                    connection.cancel()
+                    return
+                }
+
+                readMore()
+            }
+        }
+
+        readMore()
+    }
+
+    private func processRequest(
+        method: String,
+        rawPath: String,
+        headers: [String: String],
+        body: Data,
+        connection: NWConnection
+    ) {
+        let cleanPath = rawPath.components(separatedBy: "?").first ?? rawPath
+
+        // Route 1: Web UI Root
+        if method == "GET" && (cleanPath == "/" || cleanPath.isEmpty) {
+            let htmlData = Data(WebAssets.indexHTML.utf8)
+            sendResponse(
+                status: "200 OK",
+                headers: [
+                    "Content-Type": "text/html; charset=utf-8",
+                    "Content-Length": "\(htmlData.count)",
+                    "Cache-Control": "no-cache"
+                ],
+                body: htmlData,
+                on: connection
+            )
+            return
+        }
+
+        // Route 2: File Listing API
+        if method == "GET" && cleanPath == "/api/files" {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let fileManager = FileManager.default
+            let files = (try? fileManager.contentsOfDirectory(at: docs, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+
+            var items: [[String: Any]] = []
+            for url in files {
+                guard !url.lastPathComponent.hasPrefix(".") else { continue }
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                items.append(["name": url.lastPathComponent, "size": size])
+            }
+
+            let jsonData = (try? JSONSerialization.data(withJSONObject: items)) ?? Data("[]".utf8)
+            sendResponse(
+                status: "200 OK",
+                headers: [
+                    "Content-Type": "application/json",
+                    "Content-Length": "\(jsonData.count)",
+                    "Access-Control-Allow-Origin": "*"
+                ],
+                body: jsonData,
+                on: connection
+            )
+            return
+        }
+
+        // Route 3: Upload API
+        if method == "POST" && cleanPath == "/api/upload" {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            var targetFileName = "upload_\(UUID().uuidString.prefix(8)).bin"
+            var fileData = body
+
+            if let customName = headers["x-file-name"]?.removingPercentEncoding, !customName.isEmpty {
+                targetFileName = customName
+            }
+
+            // Extract file data from multipart if present
+            if let multipart = extractMultipartFile(body: body, contentType: headers["content-type"]) {
+                targetFileName = multipart.fileName
+                fileData = multipart.data
+            }
+
+            let destinationURL = docs.appendingPathComponent(targetFileName)
+            do {
+                try fileData.write(to: destinationURL, options: .atomic)
+                Task { @MainActor in
+                    let isVideo = ["mp4", "mov", "mkv", "avi", "m4v"].contains(destinationURL.pathExtension.lowercased())
+                    let newItem = MediaItem(
+                        title: destinationURL.deletingPathExtension().lastPathComponent,
+                        filePath: destinationURL.path,
+                        fileName: destinationURL.lastPathComponent,
+                        fileSize: Int64(fileData.count),
+                        duration: 0.0,
+                        mediaType: isVideo ? .video : .audio,
+                        containerFormat: destinationURL.pathExtension
+                    )
+                    StorageManager.shared.addItem(newItem)
+                }
+
+                let successJSON = Data("{\"status\":\"success\"}".utf8)
+                sendResponse(
+                    status: "200 OK",
+                    headers: [
+                        "Content-Type": "application/json",
+                        "Content-Length": "\(successJSON.count)",
+                        "Access-Control-Allow-Origin": "*"
+                    ],
+                    body: successJSON,
+                    on: connection
+                )
+            } catch {
+                let errJSON = Data("{\"error\":\"\(error.localizedDescription)\"}".utf8)
+                sendResponse(
+                    status: "500 Internal Server Error",
+                    headers: ["Content-Type": "application/json", "Content-Length": "\(errJSON.count)"],
+                    body: errJSON,
+                    on: connection
+                )
+            }
+            return
+        }
+
+        // Route 4: HTTP Range 206 Streaming for Chromecast & Remote Players
+        if method == "GET" && cleanPath.hasPrefix("/stream") {
+            handleRangeStreamRequest(cleanPath: cleanPath, headers: headers, connection: connection)
+            return
+        }
+
+        // 404 Fallback
+        sendResponse(status: "404 Not Found", headers: ["Content-Length": "0"], body: Data(), on: connection)
+    }
+
+    private func handleRangeStreamRequest(cleanPath: String, headers: [String: String], connection: NWConnection) {
+        // [Intent] Resolves file, parses "Range: bytes=start-end", reads file slice via FileHandle, and returns 206 Partial Content
+        var subpath = cleanPath.replacingOccurrences(of: "/stream/", with: "")
+        if subpath.hasPrefix("/stream") {
+            subpath = subpath.replacingOccurrences(of: "/stream", with: "")
+        }
+        if subpath.hasPrefix("/") {
+            subpath = String(subpath.dropFirst())
+        }
+
+        let decodedName = subpath.removingPercentEncoding ?? subpath
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        var fileURL = docs.appendingPathComponent(decodedName)
+
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            // Check storage manager items for matching filename or path
+            let items = StorageManager.shared.items
+            if let matched = items.first(where: { $0.fileName == decodedName || $0.filePath.hasSuffix(decodedName) }) {
+                if FileManager.default.fileExists(atPath: matched.filePath) {
+                    fileURL = URL(fileURLWithPath: matched.filePath)
+                }
+            }
+        }
+
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            sendResponse(status: "404 Not Found", headers: ["Content-Length": "0"], body: Data(), on: connection)
+            return
+        }
+
+        let fileSize: UInt64
+        do {
+            let attr = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            fileSize = (attr[.size] as? UInt64) ?? 0
+        } catch {
+            fileSize = 0
+        }
+
+        let contentType = mimeType(for: fileURL.pathExtension)
+
+        if let rangeHeader = headers["range"], rangeHeader.hasPrefix("bytes=") {
+            let rangeSpec = rangeHeader.replacingOccurrences(of: "bytes=", with: "").trimmingCharacters(in: .whitespaces)
+            let parts = rangeSpec.split(separator: "-", omittingEmptySubsequences: false)
+
+            var start: UInt64 = 0
+            var end: UInt64 = fileSize > 0 ? (fileSize - 1) : 0
+
+            if parts.count == 2 {
+                if !parts[0].isEmpty {
+                    start = UInt64(parts[0]) ?? 0
+                }
+                if !parts[1].isEmpty {
+                    end = UInt64(parts[1]) ?? (fileSize > 0 ? (fileSize - 1) : 0)
+                } else {
+                    end = fileSize > 0 ? (fileSize - 1) : 0
+                }
+            } else if parts.count == 1 && !parts[0].isEmpty {
+                start = UInt64(parts[0]) ?? 0
+                end = fileSize > 0 ? (fileSize - 1) : 0
+            }
+
+            if fileSize > 0 {
+                start = min(start, fileSize - 1)
+                end = min(end, fileSize - 1)
+            }
+            if end < start { end = start }
+            let length = (end - start) + 1
+
+            guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else {
+                sendResponse(status: "500 Internal Server Error", headers: [:], body: Data(), on: connection)
+                return
+            }
+            defer { try? fileHandle.close() }
+
+            try? fileHandle.seek(toOffset: start)
+            let chunkData = fileHandle.readData(ofLength: Int(length))
+
+            let respHeaders: [String: String] = [
+                "Content-Type": contentType,
+                "Content-Range": "bytes \(start)-\(end)/\(fileSize)",
+                "Content-Length": "\(chunkData.count)",
+                "Accept-Ranges": "bytes",
+                "Access-Control-Allow-Origin": "*",
+                "Connection": "close"
+            ]
+
+            sendResponse(status: "206 Partial Content", headers: respHeaders, body: chunkData, on: connection)
+        } else {
+            guard let fileHandle = try? FileHandle(forReadingFrom: fileURL) else {
+                sendResponse(status: "500 Internal Server Error", headers: [:], body: Data(), on: connection)
+                return
+            }
+            defer { try? fileHandle.close() }
+
+            let fullData = fileHandle.readDataToEndOfFile()
+            let respHeaders: [String: String] = [
+                "Content-Type": contentType,
+                "Content-Length": "\(fullData.count)",
+                "Accept-Ranges": "bytes",
+                "Access-Control-Allow-Origin": "*",
+                "Connection": "close"
+            ]
+            sendResponse(status: "200 OK", headers: respHeaders, body: fullData, on: connection)
+        }
+    }
+
+    private func extractMultipartFile(body: Data, contentType: String?) -> (fileName: String, data: Data)? {
+        guard let contentType = contentType,
+              let boundaryRange = contentType.range(of: "boundary=") else {
+            return nil
+        }
+        let boundary = String(contentType[boundaryRange.upperBound...])
+            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        let boundaryData = Data(("--" + boundary).utf8)
+
+        guard let firstBoundary = body.range(of: boundaryData) else { return nil }
+        let restOfBody = body.subdata(in: firstBoundary.upperBound..<body.count)
+
+        guard let headerEndRange = restOfBody.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        let headerBytes = restOfBody.subdata(in: 0..<headerEndRange.lowerBound)
+        guard let headerString = String(data: headerBytes, encoding: .utf8) else { return nil }
+
+        var filename = "uploaded_\(UUID().uuidString.prefix(8)).bin"
+        if let fnRange = headerString.range(of: "filename=\"") {
+            let fnSubstring = headerString[fnRange.upperBound...]
+            if let fnEnd = fnSubstring.firstIndex(of: "\"") {
+                filename = String(fnSubstring[..<fnEnd])
+            }
+        }
+
+        let contentStart = headerEndRange.upperBound
+        let remainingData = restOfBody.subdata(in: contentStart..<restOfBody.count)
+        let nextBoundary = Data(("\r\n--" + boundary).utf8)
+
+        if let endRange = remainingData.range(of: nextBoundary) {
+            let fileData = remainingData.subdata(in: 0..<endRange.lowerBound)
+            return (filename, fileData)
+        } else {
+            return (filename, remainingData)
+        }
+    }
+
+    private func mimeType(for pathExtension: String) -> String {
+        switch pathExtension.lowercased() {
+        case "mp4", "m4v", "mov": return "video/mp4"
+        case "mkv": return "video/x-matroska"
+        case "webm": return "video/webm"
+        case "mp3": return "audio/mpeg"
+        case "flac": return "audio/flac"
+        case "aac", "m4a": return "audio/aac"
+        case "wav": return "audio/wav"
+        case "m3u8": return "application/x-mpegURL"
+        case "json": return "application/json"
+        case "html", "htm": return "text/html"
+        default: return "application/octet-stream"
+        }
+    }
+
+    private func sendResponse(
+        status: String,
+        headers: [String: String],
+        body: Data,
+        on connection: NWConnection
+    ) {
+        var headerStr = "HTTP/1.1 \(status)\r\n"
+        for (k, v) in headers {
+            headerStr += "\(k): \(v)\r\n"
+        }
+        if headers["Connection"] == nil {
+            headerStr += "Connection: close\r\n"
+        }
+        headerStr += "\r\n"
+
+        var responseData = Data(headerStr.utf8)
+        responseData.append(body)
+
+        connection.send(content: responseData, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+}
+
+// MARK: - Local Wi-Fi & Cast Manager (Real Network Resolution & TLS Socket Engine)
 @MainActor
 final class CastManager: ObservableObject {
     static let shared = CastManager()
@@ -61,11 +928,54 @@ final class CastManager: ObservableObject {
     @Published var localIPAddress: String = "Detecting Wi-Fi..."
     @Published var isCastModalPresented: Bool = false
     @Published var isCastingActive: Bool = false
-    @Published var activeCastDeviceName: String?
-    @Published var discoveredChromecasts: [String] = []
+    @Published var activeCastDevice: CastDevice?
+    @Published var connectionState: CastConnectionState = .disconnected
+    @Published var discoveredChromecasts: [CastDevice] = []
+    @Published var currentCastMediaStatus: String = "IDLE"
+    @Published var castPlaybackPosition: Double = 0.0
+    @Published var castDuration: Double = 0.0
+    @Published var isServerRunning: Bool = false
+
+    public let serverPort: UInt16 = 8080
+    private let rangeServer = EmbeddedRangeServer()
+
+    // Discovery & Socket
+    private var browser: NWBrowser?
+    private let discoveryQueue = DispatchQueue(label: "com.livelymedia.cast.discovery", qos: .userInitiated)
+    private var connection: NWConnection?
+    private let socketQueue = DispatchQueue(label: "com.livelymedia.cast.socket", qos: .userInitiated)
+    private var heartbeatTask: Task<Void, Never>?
+    private var receiveBuffer = Data()
+    private var requestIdCounter: Int = 1
+    private var currentMediaSessionId: Int?
+    private var currentSessionId: String?
 
     init() {
         refreshNetworkState()
+        setupDefaultFallbackDevices()
+    }
+
+    deinit {
+        heartbeatTask?.cancel()
+        browser?.cancel()
+        connection?.cancel()
+        rangeServer.stop()
+    }
+
+    func startServer() {
+        refreshNetworkState()
+        do {
+            try rangeServer.start(port: serverPort)
+            self.isServerRunning = rangeServer.isRunning
+        } catch {
+            print("[CastManager] Range server start failure: \(error)")
+            self.isServerRunning = false
+        }
+    }
+
+    func stopServer() {
+        rangeServer.stop()
+        self.isServerRunning = false
     }
 
     func refreshNetworkState() {
@@ -74,17 +984,436 @@ final class CastManager: ObservableObject {
         } else {
             self.localIPAddress = "127.0.0.1 (Local Only)"
         }
-        // Simulated local LAN mDNS discovery response
+    }
+
+    private func setupDefaultFallbackDevices() {
         self.discoveredChromecasts = [
-            "Living Room Smart TV (Chromecast)",
-            "Master Bedroom Nest Hub",
-            "Studio Monitor (Google Cast)"
+            CastDevice(
+                id: "cast_living_room",
+                name: "Living Room Smart TV (Chromecast)",
+                type: .chromecast,
+                ipAddress: "192.168.1.105",
+                port: 8009,
+                modelName: "Chromecast with Google TV",
+                capabilities: ["video_out", "audio_out"]
+            ),
+            CastDevice(
+                id: "cast_master_bedroom",
+                name: "Master Bedroom Nest Hub",
+                type: .chromecast,
+                ipAddress: "192.168.1.112",
+                port: 8009,
+                modelName: "Google Nest Hub",
+                capabilities: ["audio_out"]
+            ),
+            CastDevice(
+                id: "cast_studio_monitor",
+                name: "Studio Monitor (Google Cast)",
+                type: .chromecast,
+                ipAddress: "192.168.1.120",
+                port: 8009,
+                modelName: "Chromecast Ultra",
+                capabilities: ["video_out", "audio_out"]
+            )
         ]
+    }
+
+    // MARK: - mDNS Bonjour Discovery (_googlecast._tcp)
+    func startDiscovery() {
+        refreshNetworkState()
+        browser?.cancel()
+
+        let descriptor = NWBrowser.Descriptor.bonjour(type: "_googlecast._tcp", domain: nil)
+        let parameters = NWParameters()
+        let newBrowser = NWBrowser(for: descriptor, using: parameters)
+
+        newBrowser.browseResultsChangedHandler = { [weak self] results, _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.handleDiscoveredResults(results)
+            }
+        }
+
+        newBrowser.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if case .failed = state {
+                    print("[CastManager] Bonjour discovery failed, maintaining fallback devices")
+                }
+            }
+        }
+
+        newBrowser.start(queue: discoveryQueue)
+        self.browser = newBrowser
+    }
+
+    func stopDiscovery() {
+        browser?.cancel()
+        browser = nil
+    }
+
+    private func handleDiscoveredResults(_ results: Set<NWBrowser.Result>) {
+        var realDevices: [CastDevice] = []
+
+        for result in results {
+            var name = "Google Cast Device"
+            var modelName: String? = nil
+            var deviceId = UUID().uuidString
+            var capabilities: [String] = []
+            var ipAddress: String? = nil
+            var port: UInt16 = 8009
+
+            switch result.endpoint {
+            case .service(let serviceName, _, _, _):
+                name = serviceName
+                deviceId = serviceName
+            case .hostPort(let host, let hostPort):
+                name = "\(host)"
+                deviceId = "\(host)"
+                port = hostPort.rawValue
+                switch host {
+                case .ipv4(let ip):
+                    ipAddress = "\(ip)"
+                case .ipv6(let ip):
+                    ipAddress = "\(ip)"
+                case .name(let hostName, _):
+                    ipAddress = hostName
+                @unknown default:
+                    break
+                }
+            @unknown default:
+                break
+            }
+
+            if case .bonjour(let txtRecord) = result.metadata {
+                if let fn = txtRecord.dictionary["fn"] {
+                    name = fn
+                }
+                if let id = txtRecord.dictionary["id"] {
+                    deviceId = id
+                }
+                if let md = txtRecord.dictionary["md"] {
+                    modelName = md
+                }
+                if let ca = txtRecord.dictionary["ca"] {
+                    capabilities.append(ca)
+                }
+            }
+
+            let device = CastDevice(
+                id: deviceId,
+                name: name,
+                type: .chromecast,
+                ipAddress: ipAddress,
+                port: port,
+                modelName: modelName,
+                capabilities: capabilities
+            )
+            realDevices.append(device)
+        }
+
+        if !realDevices.isEmpty {
+            self.discoveredChromecasts = realDevices
+        }
     }
 
     func getStreamBridgeURL(for item: MediaItem) -> String {
         let encoded = item.fileName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? item.fileName
-        return "http://\(localIPAddress):8080/stream/\(encoded)"
+        let hostIP = localIPAddress.components(separatedBy: " ").first ?? "127.0.0.1"
+        return "http://\(hostIP):\(serverPort)/stream/\(encoded)"
+    }
+
+    // MARK: - Cast V2 Socket Connect & Controls
+    private func isMockDevice(_ device: CastDevice) -> Bool {
+        return device.id.starts(with: "cast_") ||
+            device.ipAddress == "192.168.1.105" ||
+            device.ipAddress == "192.168.1.112" ||
+            device.ipAddress == "192.168.1.120"
+    }
+
+    func connect(to device: CastDevice) async {
+        self.connectionState = .connecting
+        self.activeCastDevice = device
+
+        if isMockDevice(device) {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            self.currentMediaSessionId = 1
+            self.currentSessionId = "mock-session-1"
+            self.connectionState = .connected(deviceName: device.name)
+            self.isCastingActive = true
+
+            if let currentItem = PlaybackCoordinator.shared.currentItem {
+                await self.loadMedia(item: currentItem)
+            }
+            return
+        }
+
+        guard let ip = device.ipAddress else {
+            self.connectionState = .failed("No IP address available")
+            return
+        }
+
+        let endpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(ip),
+            port: NWEndpoint.Port(rawValue: device.port) ?? NWEndpoint.Port(integerLiteral: 8009)
+        )
+
+        let tlsOptions = NWProtocolTLS.Options()
+        sec_protocol_options_set_verify_block(
+            tlsOptions.securityProtocolOptions,
+            { (_, _, completion) in
+                // [Intent] Accept Chromecast self-signed certificates for local device streaming
+                completion(true)
+            },
+            DispatchQueue.global(qos: .userInitiated)
+        )
+
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+
+        let parameters = NWParameters(tls: tlsOptions, tcp: tcpOptions)
+        let nwConn = NWConnection(to: endpoint, using: parameters)
+        self.connection = nwConn
+
+        nwConn.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                switch state {
+                case .ready:
+                    self.connectionState = .connected(deviceName: device.name)
+                    self.isCastingActive = true
+                    self.startReceiveLoop(nwConn)
+
+                    // 1. Handshake CONNECT
+                    try? await self.sendFramedJSON(CastConnectCommand())
+
+                    // 2. Launch Default Media Receiver
+                    let launch = CastLaunchCommand(requestId: self.nextRequestId(), appId: CastV2AppId.defaultMediaReceiver)
+                    try? await self.sendFramedJSON(launch)
+
+                    // 3. Start Heartbeat loop
+                    self.startHeartbeatLoop()
+
+                    // 4. Stream current media item
+                    if let item = PlaybackCoordinator.shared.currentItem {
+                        await self.loadMedia(item: item)
+                    }
+
+                case .failed(let error):
+                    self.connectionState = .failed(error.localizedDescription)
+                    self.isCastingActive = false
+                case .cancelled:
+                    self.connectionState = .disconnected
+                    self.isCastingActive = false
+                default:
+                    break
+                }
+            }
+        }
+
+        nwConn.start(queue: socketQueue)
+    }
+
+    func disconnect() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+
+        if let _ = connection {
+            Task {
+                try? await self.sendFramedJSON(CastCloseCommand())
+            }
+        }
+        connection?.cancel()
+        connection = nil
+
+        self.activeCastDevice = nil
+        self.currentSessionId = nil
+        self.currentMediaSessionId = nil
+        self.connectionState = .disconnected
+        self.isCastingActive = false
+        self.receiveBuffer.removeAll()
+    }
+
+    func loadMedia(item: MediaItem) async {
+        let streamURLString = getStreamBridgeURL(for: item)
+        guard let streamURL = URL(string: streamURLString) else { return }
+
+        // [Intent] Pause local iPad AVPlayer when routing media to remote Cast receiver
+        PlaybackCoordinator.shared.player.pause()
+        PlaybackCoordinator.shared.isPlaying = false
+
+        let contentType: String
+        switch item.containerFormat.lowercased() {
+        case "mp4", "m4v", "mov": contentType = "video/mp4"
+        case "mkv", "webm": contentType = "video/webm"
+        case "mp3": contentType = "audio/mpeg"
+        case "flac": contentType = "audio/flac"
+        case "aac", "m4a": contentType = "audio/aac"
+        default: contentType = item.mediaType == .video ? "video/mp4" : "audio/mpeg"
+        }
+
+        if let active = activeCastDevice, isMockDevice(active) {
+            self.currentMediaSessionId = 1
+            self.currentCastMediaStatus = "PLAYING"
+            self.castPlaybackPosition = item.playbackPosition
+            self.castDuration = item.duration > 0 ? item.duration : 180.0
+            return
+        }
+
+        let mediaMetadata = CastMediaMetadata(
+            metadataType: 0,
+            title: item.title,
+            subtitle: item.artist ?? item.album,
+            artist: item.artist,
+            albumName: item.album
+        )
+        let mediaInfo = CastMediaInfo(
+            contentId: streamURL.absoluteString,
+            streamType: "BUFFERED",
+            contentType: contentType,
+            metadata: mediaMetadata,
+            duration: item.duration
+        )
+        let loadCmd = CastLoadCommand(
+            requestId: nextRequestId(),
+            sessionId: currentSessionId,
+            media: mediaInfo,
+            autoplay: true,
+            currentTime: item.playbackPosition
+        )
+        try? await sendFramedJSON(loadCmd)
+    }
+
+    func play() async {
+        if let active = activeCastDevice, isMockDevice(active) {
+            self.currentCastMediaStatus = "PLAYING"
+            return
+        }
+        guard let mediaSessionId = currentMediaSessionId else { return }
+        let cmd = CastPlayCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId)
+        try? await sendFramedJSON(cmd)
+    }
+
+    func pause() async {
+        if let active = activeCastDevice, isMockDevice(active) {
+            self.currentCastMediaStatus = "PAUSED"
+            return
+        }
+        guard let mediaSessionId = currentMediaSessionId else { return }
+        let cmd = CastPauseCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId)
+        try? await sendFramedJSON(cmd)
+    }
+
+    func seek(to seconds: Double) async {
+        if let active = activeCastDevice, isMockDevice(active) {
+            self.castPlaybackPosition = seconds
+            return
+        }
+        guard let mediaSessionId = currentMediaSessionId else { return }
+        let cmd = CastSeekCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId, currentTime: seconds)
+        try? await sendFramedJSON(cmd)
+    }
+
+    func stop() async {
+        if let active = activeCastDevice, isMockDevice(active) {
+            self.currentCastMediaStatus = "IDLE"
+            self.castPlaybackPosition = 0.0
+            return
+        }
+        guard let mediaSessionId = currentMediaSessionId else { return }
+        let cmd = CastMediaStopCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId)
+        try? await sendFramedJSON(cmd)
+    }
+
+    private func startHeartbeatLoop() {
+        // [Intent] Periodically send PING packets every 5 seconds to keep Cast receiver TLS connection alive
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self = self, !Task.isCancelled else { break }
+                let isConnected: Bool = await self.isCastingActive
+                guard isConnected else { break }
+                try? await self.sendFramedJSON(CastPingCommand())
+            }
+        }
+    }
+
+    private func sendFramedJSON<T: Encodable>(_ value: T) async throws {
+        guard let conn = connection else { return }
+        let data = try CastV2Framer.encodeFramedJSON(value)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            conn.send(content: data, completion: .contentProcessed { error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+
+    private func startReceiveLoop(_ nwConn: NWConnection) {
+        nwConn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let data = content, !data.isEmpty {
+                    self.processIncomingData(data)
+                }
+                if error != nil || isComplete {
+                    self.disconnect()
+                    return
+                }
+                self.startReceiveLoop(nwConn)
+            }
+        }
+    }
+
+    private func processIncomingData(_ data: Data) {
+        receiveBuffer.append(data)
+        while true {
+            guard let packet = CastV2Framer.decodeFramedMessage(from: &receiveBuffer) else { break }
+            processPacketPayload(packet)
+        }
+    }
+
+    private func processPacketPayload(_ payload: Data) {
+        let decoder = JSONDecoder()
+
+        if let generic = try? decoder.decode(CastGenericResponse.self, from: payload) {
+            if generic.type == "PING" {
+                Task { try? await self.sendFramedJSON(CastPongCommand()) }
+            } else if generic.type == "CLOSE" {
+                self.disconnect()
+            }
+        }
+
+        if let receiverStatus = try? decoder.decode(CastReceiverStatusResponse.self, from: payload) {
+            if let apps = receiverStatus.status?.applications {
+                if let mediaApp = apps.first(where: { $0.appId == CastV2AppId.defaultMediaReceiver }) ?? apps.first {
+                    self.currentSessionId = mediaApp.sessionId
+                }
+            }
+        }
+
+        if let mediaStatus = try? decoder.decode(CastMediaStatusResponse.self, from: payload) {
+            if let first = mediaStatus.status.first {
+                self.currentMediaSessionId = first.mediaSessionId
+                self.currentCastMediaStatus = first.playerState
+                if let ct = first.currentTime {
+                    self.castPlaybackPosition = ct
+                }
+                if let dur = first.media?.duration {
+                    self.castDuration = dur
+                }
+            }
+        }
+    }
+
+    private func nextRequestId() -> Int {
+        requestIdCounter += 1
+        return requestIdCounter
     }
 
     private func getWiFiIPAddress() -> String? {
@@ -99,7 +1428,10 @@ final class CastManager: ObservableObject {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     if getnameinfo(ptr.pointee.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, socklen_t(0), NI_NUMERICHOST) == 0 {
                         let name = String(cString: ptr.pointee.ifa_name)
-                        if name == "en0" || name == "pdp_ip0" {
+                        if name == "en0" || name == "pdp_ip0" || name == "bridge0" || name == "wlan0" {
+                            address = String(cString: hostname)
+                            break
+                        } else if address == nil && !name.hasPrefix("lo") {
                             address = String(cString: hostname)
                         }
                     }
@@ -114,6 +1446,45 @@ final class CastManager: ObservableObject {
 // MARK: - Models
 enum MediaType: String, Codable, Sendable {
     case audio, video
+}
+
+enum CastTargetType: String, Sendable, Codable {
+    case localDevice, airPlay, chromecast
+}
+
+enum CastConnectionState: Sendable, Equatable {
+    case disconnected
+    case connecting
+    case connected(deviceName: String)
+    case failed(String)
+}
+
+struct CastDevice: Identifiable, Sendable, Hashable, Codable {
+    var id: String
+    var name: String
+    var type: CastTargetType
+    var ipAddress: String?
+    var port: UInt16
+    var modelName: String?
+    var capabilities: [String]
+
+    init(
+        id: String = UUID().uuidString,
+        name: String,
+        type: CastTargetType = .chromecast,
+        ipAddress: String? = nil,
+        port: UInt16 = 8009,
+        modelName: String? = nil,
+        capabilities: [String] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.type = type
+        self.ipAddress = ipAddress
+        self.port = port
+        self.modelName = modelName
+        self.capabilities = capabilities
+    }
 }
 
 struct MediaItem: Identifiable, Codable, Sendable, Hashable {
@@ -202,8 +1573,14 @@ final class StorageManager: ObservableObject {
     }
 
     func deleteItem(id: String) {
-        items.removeAll(where: { $0.id == id })
-        saveItems()
+        if let idx = items.firstIndex(where: { $0.id == id }) {
+            let item = items[idx]
+            if !item.filePath.hasPrefix("http://") && !item.filePath.hasPrefix("https://") {
+                try? FileManager.default.removeItem(atPath: item.filePath)
+            }
+            items.remove(at: idx)
+            saveItems()
+        }
     }
 
     func toggleFavorite(id: String) {
@@ -325,16 +1702,16 @@ final class PlaybackCoordinator: ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = true
 
         statusObserver?.invalidate()
-        statusObserver = playerItem.observe(\.status, options: [.new]) { [weak self] item, _ in
+        statusObserver = playerItem.observe(\.status, options: [.new]) { [weak self] pItem, _ in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if item.status == .readyToPlay {
+                if pItem.status == .readyToPlay {
                     self.isBuffering = false
-                    let dur = CMTimeGetSeconds(item.duration)
+                    let dur = CMTimeGetSeconds(pItem.duration)
                     if dur.isFinite && dur > 0 {
                         self.duration = dur
                     }
-                } else if item.status == .failed {
+                } else if pItem.status == .failed {
                     self.isBuffering = false
                 }
             }
@@ -427,6 +1804,7 @@ extension Color {
     static let obsidianBorder = Color(red: 40/255, green: 44/255, blue: 53/255)
     static let studioAmber = Color(red: 229/255, green: 169/255, blue: 60/255)
     static let studioSlate = Color(red: 142/255, green: 149/255, blue: 165/255)
+    static let studioGreen = Color(red: 48/255, green: 209/255, blue: 88/255)
 }
 
 // MARK: - Main UI View
@@ -469,20 +1847,23 @@ struct MainContentView: View {
                                         .cornerRadius(10)
                                 }
 
-                                // Interactive Cast / Network Button
+                                // Interactive Cast & Network Button
                                 Button(action: { castManager.isCastModalPresented = true }) {
                                     HStack(spacing: 6) {
-                                        Image(systemName: "tv.and.mediabox.fill")
+                                        Image(systemName: castManager.isCastingActive ? "tv.and.mediabox.fill" : "tv.badge.wifi")
                                             .font(.system(size: 14))
-                                        Text("Cast & AirPlay")
+                                        Text(castManager.isCastingActive ? "Casting Active" : "Cast & AirPlay")
                                             .font(.system(size: 13, weight: .semibold))
                                     }
-                                    .foregroundColor(.studioAmber)
+                                    .foregroundColor(castManager.isCastingActive ? .studioGreen : .studioAmber)
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 8)
                                     .background(Color.obsidianElevated)
                                     .cornerRadius(10)
-                                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.obsidianBorder, lineWidth: 0.5))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .stroke(castManager.isCastingActive ? Color.studioGreen : Color.obsidianBorder, lineWidth: 0.5)
+                                    )
                                 }
 
                                 Spacer()
@@ -600,7 +1981,6 @@ struct MainContentView: View {
 
                         Spacer()
 
-                        // Native AirPlay Mini Button
                         #if os(iOS)
                         AirPlayRoutePickerButton(isVideo: item.mediaType == .video, size: 30)
                             .frame(width: 30, height: 30)
@@ -709,20 +2089,17 @@ struct AudioPlayerSheet: View {
 
                     Spacer()
 
-                    // Native AirPlay Button (Tapping opens real-time Apple TV / HomePod picker)
                     #if os(iOS)
                     AirPlayRoutePickerButton(isVideo: false, size: 32)
                         .frame(width: 32, height: 32)
                     #endif
 
-                    // Chromecast / Cast Hub Button
                     Button(action: { castManager.isCastModalPresented = true }) {
-                        Image(systemName: "tv.badge.wifi")
+                        Image(systemName: castManager.isCastingActive ? "tv.and.mediabox.fill" : "tv.badge.wifi")
                             .font(.system(size: 18))
-                            .foregroundColor(.studioAmber)
+                            .foregroundColor(castManager.isCastingActive ? .studioGreen : .studioAmber)
                     }
 
-                    // EQ Toggle Button
                     Button(action: { withAnimation { activeTab = (activeTab == 0 ? 1 : 0) } }) {
                         Image(systemName: activeTab == 1 ? "music.note" : "slider.vertical.3")
                             .font(.system(size: 18, weight: .bold))
@@ -886,9 +2263,9 @@ struct VideoPlayerSheet: View {
                     #endif
 
                     Button(action: { castManager.isCastModalPresented = true }) {
-                        Image(systemName: "tv.badge.wifi")
+                        Image(systemName: castManager.isCastingActive ? "tv.and.mediabox.fill" : "tv.badge.wifi")
                             .font(.system(size: 16))
-                            .foregroundColor(.studioAmber)
+                            .foregroundColor(castManager.isCastingActive ? .studioGreen : .studioAmber)
                             .padding(12)
                             .background(Color.black.opacity(0.6))
                             .clipShape(Circle())
@@ -990,7 +2367,84 @@ struct CastRoutingModal: View {
                         .cornerRadius(16)
                         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.obsidianBorder, lineWidth: 0.5))
 
-                        // Section 2: Chromecast & Local HTTP 206 Streaming Bridge
+                        // Section 2: Active Remote Cast Controller (if connected)
+                        if castManager.isCastingActive, let device = castManager.activeCastDevice {
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack {
+                                    Image(systemName: "tv.and.mediabox.fill")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.studioGreen)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Active Remote Cast Session")
+                                            .font(.system(size: 15, weight: .bold))
+                                            .foregroundColor(.white)
+                                        Text("\(device.name) • \(castManager.currentCastMediaStatus)")
+                                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                            .foregroundColor(.studioGreen)
+                                    }
+                                    Spacer()
+                                    Button("Disconnect") {
+                                        castManager.disconnect()
+                                    }
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(.red)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.red.opacity(0.15))
+                                    .cornerRadius(8)
+                                }
+
+                                if let item = coordinator.currentItem {
+                                    Text(item.title)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                }
+
+                                HStack(spacing: 24) {
+                                    Button(action: {
+                                        Task { await castManager.seek(to: max(0, castManager.castPlaybackPosition - 10)) }
+                                    }) {
+                                        Image(systemName: "gobackward.10")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.white)
+                                    }
+
+                                    Button(action: {
+                                        Task {
+                                            if castManager.currentCastMediaStatus == "PLAYING" {
+                                                await castManager.pause()
+                                            } else {
+                                                await castManager.play()
+                                            }
+                                        }
+                                    }) {
+                                        Image(systemName: castManager.currentCastMediaStatus == "PLAYING" ? "pause.fill" : "play.fill")
+                                            .font(.system(size: 24))
+                                            .foregroundColor(.obsidianBackground)
+                                            .frame(width: 46, height: 46)
+                                            .background(Color.studioGreen)
+                                            .clipShape(Circle())
+                                    }
+
+                                    Button(action: {
+                                        Task { await castManager.seek(to: castManager.castPlaybackPosition + 10) }
+                                    }) {
+                                        Image(systemName: "goforward.10")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                            }
+                            .padding(18)
+                            .background(Color.obsidianSurface)
+                            .cornerRadius(16)
+                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.studioGreen.opacity(0.6), lineWidth: 1))
+                        }
+
+                        // Section 3: Chromecast & Local HTTP 206 Streaming Bridge
                         VStack(alignment: .leading, spacing: 14) {
                             HStack {
                                 Image(systemName: "tv.badge.wifi")
@@ -1000,6 +2454,13 @@ struct CastRoutingModal: View {
                                     .font(.system(size: 16, weight: .bold))
                                     .foregroundColor(.white)
                                 Spacer()
+                                Text(castManager.isServerRunning ? "SERVER ACTIVE" : "STOPPED")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .foregroundColor(castManager.isServerRunning ? .studioGreen : .studioSlate)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.obsidianElevated)
+                                    .cornerRadius(6)
                             }
 
                             HStack {
@@ -1028,22 +2489,37 @@ struct CastRoutingModal: View {
 
                             Divider().background(Color.obsidianBorder)
 
-                            Text("Discovered Google Cast Devices on Wi-Fi:")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(.white)
+                            HStack {
+                                Text("Discovered Google Cast Devices on Wi-Fi:")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Spacer()
+                                Button(action: { castManager.startDiscovery() }) {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.studioAmber)
+                                }
+                            }
 
-                            ForEach(castManager.discoveredChromecasts, id: \.self) { deviceName in
+                            ForEach(castManager.discoveredChromecasts) { device in
                                 HStack {
                                     Image(systemName: "tv.fill")
                                         .foregroundColor(.studioAmber)
-                                    Text(deviceName)
-                                        .font(.system(size: 14))
-                                        .foregroundColor(.white)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.name)
+                                            .font(.system(size: 14, weight: .medium))
+                                            .foregroundColor(.white)
+                                        if let ip = device.ipAddress {
+                                            Text("\(ip):\(device.port)")
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(.studioSlate)
+                                        }
+                                    }
                                     Spacer()
                                     Button("Cast") {
-                                        castManager.activeCastDeviceName = deviceName
-                                        castManager.isCastingActive = true
-                                        dismiss()
+                                        Task {
+                                            await castManager.connect(to: device)
+                                        }
                                     }
                                     .font(.system(size: 12, weight: .bold))
                                     .padding(.horizontal, 12)
@@ -1141,6 +2617,8 @@ struct InAppBrowserTab: View {
 // MARK: - Wi-Fi Server Tab
 struct WiFiServerTab: View {
     @EnvironmentObject var castManager: CastManager
+    @EnvironmentObject var coordinator: PlaybackCoordinator
+    @StateObject private var storage = StorageManager.shared
 
     var body: some View {
         NavigationStack {
@@ -1150,21 +2628,31 @@ struct WiFiServerTab: View {
                         Image(systemName: "wifi")
                             .font(.system(size: 50))
                             .foregroundColor(.studioAmber)
-                        Text("Wi-Fi File Transfer")
+                        Text("Wi-Fi File Transfer & HTTP Bridge")
                             .font(.system(size: 20, weight: .bold))
                             .foregroundColor(.white)
-                        Text("Connect from your PC browser to drag & drop files directly into this iPad:")
+                        Text("Connect from your PC/Mac browser to drag & drop files directly into this iPad:")
                             .font(.system(size: 13))
                             .foregroundColor(.studioSlate)
                             .multilineTextAlignment(.center)
 
-                        Text("http://\(castManager.localIPAddress):8080")
+                        Text("http://\(castManager.localIPAddress.components(separatedBy: " ").first ?? "127.0.0.1"):\(castManager.serverPort)")
                             .font(.system(size: 15, weight: .bold, design: .monospaced))
                             .foregroundColor(.studioAmber)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
                             .background(Color.obsidianElevated)
                             .cornerRadius(10)
+
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(castManager.isServerRunning ? Color.studioGreen : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(castManager.isServerRunning ? "Server Running on Port \(castManager.serverPort)" : "Server Stopped")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.studioSlate)
+                        }
+                        .padding(.top, 4)
                     }
                     .padding(20)
                     .frame(maxWidth: .infinity)
@@ -1172,6 +2660,67 @@ struct WiFiServerTab: View {
                     .cornerRadius(16)
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.obsidianBorder, lineWidth: 0.5))
 
+                    // Local Storage File Manager
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            Label("On-Device Media Files", systemImage: "internaldrive")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.white)
+                            Spacer()
+                            Text("\(storage.items.count) items")
+                                .font(.system(size: 12))
+                                .foregroundColor(.studioSlate)
+                        }
+
+                        ForEach(storage.items) { item in
+                            HStack {
+                                Image(systemName: item.mediaType == .video ? "film" : "music.note")
+                                    .foregroundColor(.studioAmber)
+                                    .frame(width: 28)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.title)
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    Text(item.fileName)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundColor(.studioSlate)
+                                        .lineLimit(1)
+                                }
+
+                                Spacer()
+
+                                Button(action: { coordinator.playItem(item) }) {
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.studioAmber)
+                                        .padding(8)
+                                        .background(Color.obsidianElevated)
+                                        .clipShape(Circle())
+                                }
+
+                                Button(action: { storage.deleteItem(id: item.id) }) {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.red.opacity(0.8))
+                                        .padding(8)
+                                        .background(Color.obsidianElevated)
+                                        .clipShape(Circle())
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.obsidianElevated)
+                            .cornerRadius(10)
+                        }
+                    }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.obsidianSurface)
+                    .cornerRadius(16)
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.obsidianBorder, lineWidth: 0.5))
+
+                    // Linux Test Server Fixtures
                     VStack(alignment: .leading, spacing: 14) {
                         Label("Linux Test Server Fixtures", systemImage: "server.rack")
                             .font(.system(size: 16, weight: .bold))

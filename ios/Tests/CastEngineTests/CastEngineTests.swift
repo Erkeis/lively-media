@@ -1,4 +1,4 @@
-// [Intent] Unit tests verifying Cast V2 framing, payload serialization, media control commands, status decoding, and stream bridging
+// [Intent] Unit tests verifying Cast V2 framing, payload serialization, media control commands, status decoding, stream bridging, NW discovery, session lifecycle, and CastCoordinator integration
 import XCTest
 import CoreStorage
 @testable import CastEngine
@@ -252,7 +252,7 @@ final class CastEngineTests: XCTestCase {
         XCTAssertEqual(decoded, device)
     }
 
-    // MARK: - Legacy Stream Bridge & Discovery Integration
+    // MARK: - Stream Bridge & Discovery Integration
 
     func testChromecastStreamBridgePayloadGeneration() {
         let bridge = ChromecastStreamBridge()
@@ -277,21 +277,214 @@ final class CastEngineTests: XCTestCase {
     }
 
     func testChromecastServiceDiscoveryAndConnect() async throws {
-        let service = ChromecastService()
-        service.startDiscovery()
+        let service = ChromecastService(isMockMode: true)
+        var discoveredList: [CastDevice] = []
+        service.onDevicesDiscovered = { devices in
+            discoveredList = devices
+        }
 
+        service.startDiscovery()
         XCTAssertFalse(service.discoveredDevices.isEmpty)
+        XCTAssertFalse(discoveredList.isEmpty)
+
         let target = service.discoveredDevices[0]
+        var stateTransitions: [CastConnectionState] = []
+        service.onStateChange = { state in
+            stateTransitions.append(state)
+        }
 
         try await service.connect(to: target)
+
         if case .connected(let name) = service.connectionState {
             XCTAssertEqual(name, target.name)
         } else {
             XCTFail("Service must be in connected state")
         }
 
+        XCTAssertNotNil(service.currentSessionId)
+        XCTAssertNotNil(service.currentTransportId)
+        XCTAssertEqual(service.currentMediaSessionId, 1)
+
         await service.disconnect()
         XCTAssertEqual(service.connectionState, .disconnected)
+        XCTAssertNil(service.currentSessionId)
+        XCTAssertNil(service.currentMediaSessionId)
+    }
+
+    func testChromecastServiceRemoteMediaControls() async throws {
+        let service = ChromecastService(isMockMode: true)
+        let target = ChromecastService.defaultMockDevices[0]
+        try await service.connect(to: target)
+
+        var lastStatus: CastMediaStatusItem?
+        service.onMediaStatusChange = { status in
+            lastStatus = status
+        }
+
+        // 1. Load Media
+        let payload = CastMediaPayload(
+            streamURL: URL(string: "http://192.168.1.50:8080/stream/song.mp3")!,
+            contentType: "audio/mpeg",
+            title: "Synthwave Track",
+            subtitle: "Artist X",
+            duration: 240.0
+        )
+        try await service.loadMedia(payload: payload, autoplay: true, currentTime: 10.0)
+
+        XCTAssertEqual(lastStatus?.playerState, "PLAYING")
+        XCTAssertEqual(lastStatus?.media?.title, "Synthwave Track")
+        XCTAssertEqual(lastStatus?.currentTime, 10.0)
+
+        // 2. Pause
+        try await service.pause()
+        XCTAssertEqual(lastStatus?.playerState, "PAUSED")
+
+        // 3. Play
+        try await service.play()
+        XCTAssertEqual(lastStatus?.playerState, "PLAYING")
+
+        // 4. Seek
+        try await service.seek(to: 95.5)
+        XCTAssertEqual(lastStatus?.currentTime, 95.5)
+
+        // 5. Set Volume
+        try await service.setVolume(0.65)
+        XCTAssertEqual(lastStatus?.volume?.level, 0.65)
+
+        // 6. Stop
+        try await service.stop()
+        XCTAssertEqual(lastStatus?.playerState, "IDLE")
+        XCTAssertEqual(lastStatus?.idleReason, "CANCELLED")
+
+        await service.disconnect()
+    }
+
+    func testChromecastServicePacketParsingAndSessionTracking() {
+        let service = ChromecastService(isMockMode: true)
+
+        // 1. Process Framed RECEIVER_STATUS
+        let receiverJson = """
+        {
+            "type": "RECEIVER_STATUS",
+            "requestId": 12,
+            "status": {
+                "applications": [
+                    {
+                        "appId": "CC1AD845",
+                        "displayName": "Default Media Receiver",
+                        "sessionId": "live-sess-999",
+                        "statusText": "Ready",
+                        "transportId": "live-transport-888"
+                    }
+                ]
+            }
+        }
+        """
+        let framedReceiverData = CastV2Framer.encodeFramedString(receiverJson)
+        service.processIncomingData(framedReceiverData)
+
+        XCTAssertEqual(service.currentSessionId, "live-sess-999")
+        XCTAssertEqual(service.currentTransportId, "live-transport-888")
+
+        // 2. Process Framed MEDIA_STATUS
+        var receivedMediaStatus: CastMediaStatusItem?
+        service.onMediaStatusChange = { status in
+            receivedMediaStatus = status
+        }
+
+        let mediaJson = """
+        {
+            "type": "MEDIA_STATUS",
+            "requestId": 13,
+            "status": [
+                {
+                    "mediaSessionId": 42,
+                    "playbackRate": 1.0,
+                    "playerState": "BUFFERING",
+                    "currentTime": 12.0
+                }
+            ]
+        }
+        """
+        let framedMediaData = CastV2Framer.encodeFramedString(mediaJson)
+        service.processIncomingData(framedMediaData)
+
+        XCTAssertEqual(service.currentMediaSessionId, 42)
+        XCTAssertEqual(receivedMediaStatus?.mediaSessionId, 42)
+        XCTAssertEqual(receivedMediaStatus?.playerState, "BUFFERING")
+    }
+
+    func testCastErrorDescriptions() {
+        let notConnected = CastError.notConnected
+        XCTAssertEqual(notConnected.errorDescription, "No active Google Cast session")
+
+        let connectionFailed = CastError.connectionFailed("Host unreachable")
+        XCTAssertEqual(connectionFailed.errorDescription, "Google Cast connection failed: Host unreachable")
+
+        let timeout = CastError.connectionTimeout
+        XCTAssertEqual(timeout.errorDescription, "Google Cast connection timed out")
+
+        let noMedia = CastError.noActiveMediaSession
+        XCTAssertEqual(noMedia.errorDescription, "No active media session on Google Cast receiver")
+
+        let invalidPayload = CastError.invalidPayload
+        XCTAssertEqual(invalidPayload.errorDescription, "Invalid Cast media payload")
+
+        let cmdFailed = CastError.commandFailed("Network write error")
+        XCTAssertEqual(cmdFailed.errorDescription, "Cast command failed: Network write error")
+    }
+
+    // MARK: - CastCoordinator Integration Tests
+
+    @MainActor
+    func testCastCoordinatorIntegration() async throws {
+        let mockService = ChromecastService(isMockMode: true)
+        let coordinator = CastCoordinator(chromecastService: mockService)
+
+        coordinator.startDiscovery()
+        XCTAssertFalse(coordinator.availableDevices.isEmpty)
+
+        let targetDevice = coordinator.availableDevices[0]
+        let testItem = MediaItem(
+            title: "Test Movie HD",
+            filePath: "/sandbox/movie.mp4",
+            fileName: "movie.mp4",
+            fileSize: 100_000_000,
+            duration: 600.0,
+            mediaType: .video,
+            containerFormat: "mp4"
+        )
+
+        try await coordinator.castMediaItem(testItem, to: targetDevice, serverPort: 8080, customHost: "192.168.1.10")
+
+        if case .connected(let name) = coordinator.connectionState {
+            XCTAssertEqual(name, targetDevice.name)
+        } else {
+            XCTFail("Coordinator connection state should be connected")
+        }
+        XCTAssertEqual(coordinator.activeTarget, .chromecast)
+
+        // Remote playback controls delegation through coordinator
+        try await coordinator.pause()
+        XCTAssertEqual(coordinator.currentMediaStatus?.playerState, "PAUSED")
+
+        try await coordinator.play()
+        XCTAssertEqual(coordinator.currentMediaStatus?.playerState, "PLAYING")
+
+        try await coordinator.seek(to: 45.0)
+        XCTAssertEqual(coordinator.currentMediaStatus?.currentTime, 45.0)
+
+        try await coordinator.setVolume(0.8)
+        XCTAssertEqual(coordinator.currentMediaStatus?.volume?.level, 0.8)
+
+        try await coordinator.stop()
+        XCTAssertEqual(coordinator.currentMediaStatus?.playerState, "IDLE")
+
+        await coordinator.disconnectCast()
+        XCTAssertEqual(coordinator.connectionState, .disconnected)
+        XCTAssertEqual(coordinator.activeTarget, .localDevice)
+        XCTAssertNil(coordinator.currentMediaStatus)
     }
 }
+
 

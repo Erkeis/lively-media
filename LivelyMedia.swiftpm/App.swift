@@ -753,13 +753,20 @@ public final class EmbeddedRangeServer: @unchecked Sendable {
         var fileURL = docs.appendingPathComponent(decodedName)
 
         if !FileManager.default.fileExists(atPath: fileURL.path) {
-            // Check storage manager items for matching filename or path
-            let items = StorageManager.shared.items
-            if let matched = items.first(where: { $0.fileName == decodedName || $0.filePath.hasSuffix(decodedName) }) {
-                if FileManager.default.fileExists(atPath: matched.filePath) {
-                    fileURL = URL(fileURLWithPath: matched.filePath)
+            // [Intent] Check filesystem and JSON library directly to avoid crossing @MainActor boundary from background server
+            let libraryJSONURL = docs.appendingPathComponent("lively_library.json")
+            if let data = try? Data(contentsOf: libraryJSONURL),
+               let decoded = try? JSONDecoder().decode([MediaItem].self, from: data) {
+                if let matched = decoded.first(where: { $0.fileName == decodedName || $0.filePath.hasSuffix(decodedName) }) {
+                    if FileManager.default.fileExists(atPath: matched.filePath) {
+                        fileURL = URL(fileURLWithPath: matched.filePath)
+                    }
                 }
             }
+        }
+
+        if !FileManager.default.fileExists(atPath: fileURL.path) && FileManager.default.fileExists(atPath: decodedName) {
+            fileURL = URL(fileURLWithPath: decodedName)
         }
 
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
@@ -1691,7 +1698,14 @@ final class PlaybackCoordinator: ObservableObject {
 
         let url: URL
         if item.filePath.hasPrefix("http://") || item.filePath.hasPrefix("https://") {
-            url = URL(string: item.filePath)!
+            if let parsed = URL(string: item.filePath) {
+                url = parsed
+            } else if let encoded = item.filePath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                      let parsed = URL(string: encoded) {
+                url = parsed
+            } else {
+                url = URL(fileURLWithPath: item.filePath)
+            }
         } else {
             url = URL(fileURLWithPath: item.filePath)
         }

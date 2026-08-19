@@ -21,3 +21,4 @@
 | [iOS Rules] | `ios/GEMINI.md` | Swift/SwiftUI and iOS client rules |
 | [Server Rules] | `server/GEMINI.md` | Linux test server & service rules |
 | [Non-Mac Test Guide] | `docs/NON_MAC_TEST_GUIDE.md` | Guide for iPad Playgrounds & Sideloading without a Mac |
+| [Stability Asset] | `docs/case-studies/KA_SWIFT_STABILITY.md` | Swift 6 stability, strict concurrency & preflight signatures |

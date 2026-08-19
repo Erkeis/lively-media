@@ -204,6 +204,16 @@ public struct CastMediaInfo: Codable, Sendable, Equatable {
     }
 }
 
+public extension CastMediaInfo {
+    var title: String? {
+        metadata?.title
+    }
+
+    var subtitle: String? {
+        metadata?.subtitle
+    }
+}
+
 public struct CastLoadCommand: Codable, Sendable, Equatable {
     public let type: String
     public let requestId: Int

@@ -160,6 +160,14 @@ struct CastMediaInfo: Codable, Sendable {
     let metadata: CastMediaMetadata?
     let duration: Double?
 
+    var title: String? {
+        metadata?.title
+    }
+
+    var subtitle: String? {
+        metadata?.subtitle
+    }
+
     init(contentId: String, streamType: String = "BUFFERED", contentType: String, metadata: CastMediaMetadata? = nil, duration: Double? = nil) {
         self.contentId = contentId
         self.streamType = streamType
@@ -1143,6 +1151,15 @@ final class CastManager: ObservableObject {
                 @unknown default:
                     break
                 }
+            case .unix(let path):
+                name = "Unix Socket"
+                deviceId = path
+            case .url(let url):
+                name = url.absoluteString
+                deviceId = url.absoluteString
+            case .opaque:
+                name = "Opaque Endpoint"
+                deviceId = UUID().uuidString
             @unknown default:
                 break
             }

@@ -261,6 +261,15 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
                 @unknown default:
                     break
                 }
+            case .unix(let path):
+                name = "Unix Socket"
+                deviceId = path
+            case .url(let url):
+                name = url.absoluteString
+                deviceId = url.absoluteString
+            case .opaque:
+                name = "Opaque Endpoint"
+                deviceId = UUID().uuidString
             @unknown default:
                 break
             }
@@ -362,7 +371,7 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
         let nwConn = NWConnection(to: endpoint, using: parameters)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var hasResumed = false
+            nonisolated(unsafe) var hasResumed = false
             let resumeLock = NSLock()
 
             nwConn.stateUpdateHandler = { [weak self] state in
@@ -391,7 +400,11 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
                             continuation.resume(throwing: CastError.connectionFailed("Connection cancelled"))
                         }
                     }
-                default:
+                case .waiting(let error):
+                    _ = error
+                case .setup, .preparing:
+                    break
+                @unknown default:
                     break
                 }
             }
@@ -432,11 +445,15 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
         heartbeatTask = nil
 
         #if canImport(Network)
-        if let _ = connection {
-            try? await sendFramedJSON(CastCloseCommand())
+        let existingConn: NWConnection? = lock.withLock {
+            let conn = self.connection
+            self.connection = nil
+            return conn
         }
-        connection?.cancel()
-        connection = nil
+        if let conn = existingConn {
+            try? await sendFramedJSON(CastCloseCommand())
+            conn.cancel()
+        }
         #endif
 
         lock.withLock {
@@ -498,7 +515,8 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
 
     private func sendRawData(_ data: Data) async throws {
         #if canImport(Network)
-        guard let conn = connection else {
+        let activeConn: NWConnection? = lock.withLock { self.connection }
+        guard let conn = activeConn else {
             if isMockMode || isMockDevice(activeDevice ?? CastDevice(name: "", type: .chromecast)) {
                 return
             }

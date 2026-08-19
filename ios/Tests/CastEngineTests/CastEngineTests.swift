@@ -278,19 +278,26 @@ final class CastEngineTests: XCTestCase {
 
     func testChromecastServiceDiscoveryAndConnect() async throws {
         let service = ChromecastService(isMockMode: true)
-        var discoveredList: [CastDevice] = []
+        nonisolated(unsafe) var discoveredList: [CastDevice] = []
+        let discoveryLock = NSLock()
         service.onDevicesDiscovered = { devices in
-            discoveredList = devices
+            discoveryLock.withLock {
+                discoveredList = devices
+            }
         }
 
         service.startDiscovery()
         XCTAssertFalse(service.discoveredDevices.isEmpty)
-        XCTAssertFalse(discoveredList.isEmpty)
+        let discoveredCount = discoveryLock.withLock { discoveredList.count }
+        XCTAssertGreaterThan(discoveredCount, 0)
 
         let target = service.discoveredDevices[0]
-        var stateTransitions: [CastConnectionState] = []
+        nonisolated(unsafe) var stateTransitions: [CastConnectionState] = []
+        let stateLock = NSLock()
         service.onStateChange = { state in
-            stateTransitions.append(state)
+            stateLock.withLock {
+                stateTransitions.append(state)
+            }
         }
 
         try await service.connect(to: target)
@@ -316,9 +323,12 @@ final class CastEngineTests: XCTestCase {
         let target = ChromecastService.defaultMockDevices[0]
         try await service.connect(to: target)
 
-        var lastStatus: CastMediaStatusItem?
+        nonisolated(unsafe) var lastStatus: CastMediaStatusItem?
+        let statusLock = NSLock()
         service.onMediaStatusChange = { status in
-            lastStatus = status
+            statusLock.withLock {
+                lastStatus = status
+            }
         }
 
         // 1. Load Media
@@ -331,30 +341,37 @@ final class CastEngineTests: XCTestCase {
         )
         try await service.loadMedia(payload: payload, autoplay: true, currentTime: 10.0)
 
-        XCTAssertEqual(lastStatus?.playerState, "PLAYING")
-        XCTAssertEqual(lastStatus?.media?.title, "Synthwave Track")
-        XCTAssertEqual(lastStatus?.currentTime, 10.0)
+        let currentStatus1 = statusLock.withLock { lastStatus }
+        XCTAssertEqual(currentStatus1?.playerState, "PLAYING")
+        XCTAssertEqual(currentStatus1?.media?.metadata?.title, "Synthwave Track")
+        XCTAssertEqual(currentStatus1?.media?.title, "Synthwave Track")
+        XCTAssertEqual(currentStatus1?.currentTime, 10.0)
 
         // 2. Pause
         try await service.pause()
-        XCTAssertEqual(lastStatus?.playerState, "PAUSED")
+        let currentStatus2 = statusLock.withLock { lastStatus }
+        XCTAssertEqual(currentStatus2?.playerState, "PAUSED")
 
         // 3. Play
         try await service.play()
-        XCTAssertEqual(lastStatus?.playerState, "PLAYING")
+        let currentStatus3 = statusLock.withLock { lastStatus }
+        XCTAssertEqual(currentStatus3?.playerState, "PLAYING")
 
         // 4. Seek
         try await service.seek(to: 95.5)
-        XCTAssertEqual(lastStatus?.currentTime, 95.5)
+        let currentStatus4 = statusLock.withLock { lastStatus }
+        XCTAssertEqual(currentStatus4?.currentTime, 95.5)
 
         // 5. Set Volume
         try await service.setVolume(0.65)
-        XCTAssertEqual(lastStatus?.volume?.level, 0.65)
+        let currentStatus5 = statusLock.withLock { lastStatus }
+        XCTAssertEqual(currentStatus5?.volume?.level, 0.65)
 
         // 6. Stop
         try await service.stop()
-        XCTAssertEqual(lastStatus?.playerState, "IDLE")
-        XCTAssertEqual(lastStatus?.idleReason, "CANCELLED")
+        let currentStatus6 = statusLock.withLock { lastStatus }
+        XCTAssertEqual(currentStatus6?.playerState, "IDLE")
+        XCTAssertEqual(currentStatus6?.idleReason, "CANCELLED")
 
         await service.disconnect()
     }
@@ -387,9 +404,12 @@ final class CastEngineTests: XCTestCase {
         XCTAssertEqual(service.currentTransportId, "live-transport-888")
 
         // 2. Process Framed MEDIA_STATUS
-        var receivedMediaStatus: CastMediaStatusItem?
+        nonisolated(unsafe) var receivedMediaStatus: CastMediaStatusItem?
+        let mediaStatusLock = NSLock()
         service.onMediaStatusChange = { status in
-            receivedMediaStatus = status
+            mediaStatusLock.withLock {
+                receivedMediaStatus = status
+            }
         }
 
         let mediaJson = """
@@ -409,9 +429,10 @@ final class CastEngineTests: XCTestCase {
         let framedMediaData = CastV2Framer.encodeFramedString(mediaJson)
         service.processIncomingData(framedMediaData)
 
+        let finalMediaStatus = mediaStatusLock.withLock { receivedMediaStatus }
         XCTAssertEqual(service.currentMediaSessionId, 42)
-        XCTAssertEqual(receivedMediaStatus?.mediaSessionId, 42)
-        XCTAssertEqual(receivedMediaStatus?.playerState, "BUFFERING")
+        XCTAssertEqual(finalMediaStatus?.mediaSessionId, 42)
+        XCTAssertEqual(finalMediaStatus?.playerState, "BUFFERING")
     }
 
     func testCastErrorDescriptions() {

@@ -927,7 +927,7 @@ public final class EmbeddedRangeServer: @unchecked Sendable {
     }
 }
 
-// MARK: - Local Wi-Fi & Cast Manager (Real Network Resolution & TLS Socket Engine)
+// MARK: - Local Wi-Fi & Cast Manager (Multi-Protocol Discovery & TLS Socket Engine)
 @MainActor
 final class CastManager: ObservableObject {
     static let shared = CastManager()
@@ -942,6 +942,9 @@ final class CastManager: ObservableObject {
     @Published var castPlaybackPosition: Double = 0.0
     @Published var castDuration: Double = 0.0
     @Published var isServerRunning: Bool = false
+    @Published var isScanning: Bool = false
+    @Published var manualIPInput: String = ""
+    @Published var scanStatusMessage: String = ""
 
     public let serverPort: UInt16 = 8080
     private let rangeServer = EmbeddedRangeServer()
@@ -959,7 +962,8 @@ final class CastManager: ObservableObject {
 
     init() {
         refreshNetworkState()
-        setupDefaultFallbackDevices()
+        // [Intent] Start with empty list to ensure only real on-network devices are listed
+        self.discoveredChromecasts = []
     }
 
     deinit {
@@ -993,44 +997,29 @@ final class CastManager: ObservableObject {
         }
     }
 
-    private func setupDefaultFallbackDevices() {
-        self.discoveredChromecasts = [
-            CastDevice(
-                id: "cast_living_room",
-                name: "Living Room Smart TV (Chromecast)",
-                type: .chromecast,
-                ipAddress: "192.168.1.105",
-                port: 8009,
-                modelName: "Chromecast with Google TV",
-                capabilities: ["video_out", "audio_out"]
-            ),
-            CastDevice(
-                id: "cast_master_bedroom",
-                name: "Master Bedroom Nest Hub",
-                type: .chromecast,
-                ipAddress: "192.168.1.112",
-                port: 8009,
-                modelName: "Google Nest Hub",
-                capabilities: ["audio_out"]
-            ),
-            CastDevice(
-                id: "cast_studio_monitor",
-                name: "Studio Monitor (Google Cast)",
-                type: .chromecast,
-                ipAddress: "192.168.1.120",
-                port: 8009,
-                modelName: "Chromecast Ultra",
-                capabilities: ["video_out", "audio_out"]
-            )
-        ]
-    }
-
-    // MARK: - mDNS Bonjour Discovery (_googlecast._tcp)
+    // MARK: - Multi-Protocol Discovery (Subnet Eureka Probe + Bonjour mDNS)
     func startDiscovery() {
         refreshNetworkState()
+        self.isScanning = true
+        self.scanStatusMessage = "Scanning Wi-Fi network..."
+
+        // 1. Native Bonjour mDNS Browser
+        startBonjourDiscovery()
+
+        // 2. Active Subnet Eureka / DIAL HTTP Probe (Port 8008)
+        scanSubnetEureka()
+    }
+
+    func stopDiscovery() {
+        browser?.cancel()
+        browser = nil
+        self.isScanning = false
+    }
+
+    private func startBonjourDiscovery() {
         browser?.cancel()
 
-        let descriptor = NWBrowser.Descriptor.bonjour(type: "_googlecast._tcp", domain: nil)
+        let descriptor = NWBrowser.Descriptor.bonjour(type: "_googlecast._tcp", domain: "local.")
         let parameters = NWParameters()
         let newBrowser = NWBrowser(for: descriptor, using: parameters)
 
@@ -1045,7 +1034,7 @@ final class CastManager: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
                 if case .failed = state {
-                    print("[CastManager] Bonjour discovery failed, maintaining fallback devices")
+                    print("[CastManager] Bonjour discovery failed, relying on subnet scan")
                 }
             }
         }
@@ -1054,14 +1043,80 @@ final class CastManager: ObservableObject {
         self.browser = newBrowser
     }
 
-    func stopDiscovery() {
-        browser?.cancel()
-        browser = nil
+    private func scanSubnetEureka() {
+        // [Intent] Google Cast devices run HTTP REST server on port 8008 with /setup/eureka_info
+        // Scanning active /24 subnet discovers devices even when Wi-Fi AP isolation blocks mDNS multicast
+        guard let ip = getWiFiIPAddress(), !ip.hasPrefix("127.0.") else {
+            self.isScanning = false
+            return
+        }
+
+        let components = ip.split(separator: ".")
+        guard components.count == 4 else {
+            self.isScanning = false
+            return
+        }
+        let subnetPrefix = "\(components[0]).\(components[1]).\(components[2])."
+        let myLastOctet = Int(components[3]) ?? 0
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 1.5
+        config.timeoutIntervalForResource = 1.5
+        let session = URLSession(configuration: config)
+
+        Task {
+            await withTaskGroup(of: CastDevice?.self) { group in
+                for i in 1...254 {
+                    if i == myLastOctet { continue }
+                    let targetIP = "\(subnetPrefix)\(i)"
+                    group.addTask {
+                        guard let url = URL(string: "http://\(targetIP):8008/setup/eureka_info") else { return nil }
+                        var request = URLRequest(url: url)
+                        request.timeoutInterval = 1.5
+                        do {
+                            let (data, response) = try await session.data(for: request)
+                            guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else { return nil }
+                            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                                let name = (json["name"] as? String) ?? "Google Cast (\(targetIP))"
+                                let model = (json["model_name"] as? String) ?? "Chromecast"
+                                let bssid = (json["bssid"] as? String) ?? "cast_\(targetIP.replacingOccurrences(of: ".", with: "_"))"
+                                return CastDevice(
+                                    id: bssid,
+                                    name: name,
+                                    type: .chromecast,
+                                    ipAddress: targetIP,
+                                    port: 8009,
+                                    modelName: model,
+                                    capabilities: ["video_out", "audio_out"]
+                                )
+                            }
+                        } catch {
+                            return nil
+                        }
+                        return nil
+                    }
+                }
+
+                for await found in group {
+                    if let device = found {
+                        Task { @MainActor in
+                            if !self.discoveredChromecasts.contains(where: { $0.ipAddress == device.ipAddress }) {
+                                self.discoveredChromecasts.append(device)
+                                print("[CastManager] Discovered Chromecast via Subnet Eureka: \(device.name) at \(device.ipAddress ?? "")")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Task { @MainActor in
+                self.isScanning = false
+                self.scanStatusMessage = self.discoveredChromecasts.isEmpty ? "No devices found on subnet. Try entering IP below." : "Found \(self.discoveredChromecasts.count) device(s)"
+            }
+        }
     }
 
     private func handleDiscoveredResults(_ results: Set<NWBrowser.Result>) {
-        var realDevices: [CastDevice] = []
-
         for result in results {
             var name = "Google Cast Device"
             var modelName: String? = nil
@@ -1116,12 +1171,46 @@ final class CastManager: ObservableObject {
                 modelName: modelName,
                 capabilities: capabilities
             )
-            realDevices.append(device)
+
+            if !self.discoveredChromecasts.contains(where: { $0.id == device.id || ($0.ipAddress != nil && $0.ipAddress == device.ipAddress) }) {
+                self.discoveredChromecasts.append(device)
+            }
+        }
+    }
+
+    func connectDirectly(ip: String, port: UInt16 = 8009) async {
+        let trimmed = ip.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        // Probe Eureka info to resolve friendly name if possible
+        var deviceName = "Google Cast (\(trimmed))"
+        var modelName = "Chromecast"
+        if let url = URL(string: "http://\(trimmed):8008/setup/eureka_info") {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 2.0
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse, http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let name = json["name"] as? String { deviceName = name }
+                if let model = json["model_name"] as? String { modelName = model }
+            }
         }
 
-        if !realDevices.isEmpty {
-            self.discoveredChromecasts = realDevices
+        let device = CastDevice(
+            id: "manual_\(trimmed)",
+            name: deviceName,
+            type: .chromecast,
+            ipAddress: trimmed,
+            port: port,
+            modelName: modelName,
+            capabilities: ["video_out", "audio_out"]
+        )
+
+        if !self.discoveredChromecasts.contains(where: { $0.ipAddress == trimmed }) {
+            self.discoveredChromecasts.insert(device, at: 0)
         }
+
+        await connect(to: device)
     }
 
     func getStreamBridgeURL(for item: MediaItem) -> String {
@@ -1131,32 +1220,12 @@ final class CastManager: ObservableObject {
     }
 
     // MARK: - Cast V2 Socket Connect & Controls
-    private func isMockDevice(_ device: CastDevice) -> Bool {
-        return device.id.starts(with: "cast_") ||
-            device.ipAddress == "192.168.1.105" ||
-            device.ipAddress == "192.168.1.112" ||
-            device.ipAddress == "192.168.1.120"
-    }
-
     func connect(to device: CastDevice) async {
         self.connectionState = .connecting
         self.activeCastDevice = device
 
-        if isMockDevice(device) {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            self.currentMediaSessionId = 1
-            self.currentSessionId = "mock-session-1"
-            self.connectionState = .connected(deviceName: device.name)
-            self.isCastingActive = true
-
-            if let currentItem = PlaybackCoordinator.shared.currentItem {
-                await self.loadMedia(item: currentItem)
-            }
-            return
-        }
-
-        guard let ip = device.ipAddress else {
-            self.connectionState = .failed("No IP address available")
+        guard let ip = device.ipAddress, !ip.isEmpty else {
+            self.connectionState = .failed("Missing IP address for Cast device")
             return
         }
 
@@ -1260,14 +1329,6 @@ final class CastManager: ObservableObject {
         default: contentType = item.mediaType == .video ? "video/mp4" : "audio/mpeg"
         }
 
-        if let active = activeCastDevice, isMockDevice(active) {
-            self.currentMediaSessionId = 1
-            self.currentCastMediaStatus = "PLAYING"
-            self.castPlaybackPosition = item.playbackPosition
-            self.castDuration = item.duration > 0 ? item.duration : 180.0
-            return
-        }
-
         let mediaMetadata = CastMediaMetadata(
             metadataType: 0,
             title: item.title,
@@ -1293,41 +1354,24 @@ final class CastManager: ObservableObject {
     }
 
     func play() async {
-        if let active = activeCastDevice, isMockDevice(active) {
-            self.currentCastMediaStatus = "PLAYING"
-            return
-        }
         guard let mediaSessionId = currentMediaSessionId else { return }
         let cmd = CastPlayCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId)
         try? await sendFramedJSON(cmd)
     }
 
     func pause() async {
-        if let active = activeCastDevice, isMockDevice(active) {
-            self.currentCastMediaStatus = "PAUSED"
-            return
-        }
         guard let mediaSessionId = currentMediaSessionId else { return }
         let cmd = CastPauseCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId)
         try? await sendFramedJSON(cmd)
     }
 
     func seek(to seconds: Double) async {
-        if let active = activeCastDevice, isMockDevice(active) {
-            self.castPlaybackPosition = seconds
-            return
-        }
         guard let mediaSessionId = currentMediaSessionId else { return }
         let cmd = CastSeekCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId, currentTime: seconds)
         try? await sendFramedJSON(cmd)
     }
 
     func stop() async {
-        if let active = activeCastDevice, isMockDevice(active) {
-            self.currentCastMediaStatus = "IDLE"
-            self.castPlaybackPosition = 0.0
-            return
-        }
         guard let mediaSessionId = currentMediaSessionId else { return }
         let cmd = CastMediaStopCommand(requestId: nextRequestId(), mediaSessionId: mediaSessionId)
         try? await sendFramedJSON(cmd)
@@ -2508,25 +2552,70 @@ struct CastRoutingModal: View {
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundColor(.white)
                                 Spacer()
-                                Button(action: { castManager.startDiscovery() }) {
-                                    Image(systemName: "arrow.clockwise")
+                                if castManager.isScanning {
+                                    ProgressView()
+                                        .tint(.studioAmber)
+                                        .scaleEffect(0.8)
+                                } else {
+                                    Button(action: { castManager.startDiscovery() }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "arrow.clockwise")
+                                            Text("Scan Wi-Fi")
+                                                .font(.system(size: 12, weight: .semibold))
+                                        }
+                                        .foregroundColor(.studioAmber)
+                                    }
+                                }
+                            }
+
+                            if castManager.isScanning && castManager.discoveredChromecasts.isEmpty {
+                                HStack(spacing: 12) {
+                                    ProgressView().tint(.studioAmber)
+                                    Text("Scanning local Wi-Fi and subnet for Chromecast & Smart TVs...")
                                         .font(.system(size: 12))
+                                        .foregroundColor(.studioSlate)
+                                }
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.obsidianElevated)
+                                .cornerRadius(10)
+                            } else if castManager.discoveredChromecasts.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("No Google Cast devices found automatically on this Wi-Fi network.")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.studioSlate)
+                                    Text("Ensure iPad and TV are on the same Wi-Fi, or enter your TV's IP below:")
+                                        .font(.system(size: 11))
                                         .foregroundColor(.studioAmber)
                                 }
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.obsidianElevated)
+                                .cornerRadius(10)
                             }
 
                             ForEach(castManager.discoveredChromecasts) { device in
                                 HStack {
                                     Image(systemName: "tv.fill")
                                         .foregroundColor(.studioAmber)
+                                        .font(.system(size: 18))
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(device.name)
-                                            .font(.system(size: 14, weight: .medium))
+                                            .font(.system(size: 14, weight: .semibold))
                                             .foregroundColor(.white)
-                                        if let ip = device.ipAddress {
-                                            Text("\(ip):\(device.port)")
-                                                .font(.system(size: 11, design: .monospaced))
-                                                .foregroundColor(.studioSlate)
+                                        HStack(spacing: 6) {
+                                            if let model = device.modelName {
+                                                Text(model)
+                                                    .font(.system(size: 11))
+                                                    .foregroundColor(.studioAmber)
+                                                Text("•")
+                                                    .foregroundColor(.obsidianBorder)
+                                            }
+                                            if let ip = device.ipAddress {
+                                                Text("\(ip):\(device.port)")
+                                                    .font(.system(size: 11, design: .monospaced))
+                                                    .foregroundColor(.studioSlate)
+                                            }
                                         }
                                     }
                                     Spacer()
@@ -2536,15 +2625,46 @@ struct CastRoutingModal: View {
                                         }
                                     }
                                     .font(.system(size: 12, weight: .bold))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
                                     .background(Color.studioAmber)
                                     .foregroundColor(.obsidianBackground)
                                     .cornerRadius(8)
                                 }
-                                .padding(10)
+                                .padding(12)
                                 .background(Color.obsidianElevated)
                                 .cornerRadius(10)
+                            }
+
+                            Divider().background(Color.obsidianBorder)
+
+                            // Manual Direct IP Connection Row
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Direct TV IP Connection:")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.white)
+                                HStack(spacing: 8) {
+                                    TextField("e.g. 192.168.1.55", text: $castManager.manualIPInput)
+                                        .textFieldStyle(PlainTextFieldStyle())
+                                        .padding(10)
+                                        .background(Color.obsidianElevated)
+                                        .cornerRadius(8)
+                                        .foregroundColor(.white)
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.obsidianBorder, lineWidth: 0.5))
+
+                                    Button("Connect & Cast") {
+                                        Task {
+                                            await castManager.connectDirectly(ip: castManager.manualIPInput)
+                                        }
+                                    }
+                                    .font(.system(size: 12, weight: .bold))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 10)
+                                    .background(Color.studioAmber)
+                                    .foregroundColor(.obsidianBackground)
+                                    .cornerRadius(8)
+                                }
                             }
                         }
                         .padding(18)

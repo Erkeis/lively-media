@@ -150,7 +150,7 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
 
     // MARK: - Initialization & Deinitialization
 
-    public init(isMockMode: Bool = false, fallbackToMockDevices: Bool = true) {
+    public init(isMockMode: Bool = false, fallbackToMockDevices: Bool = false) {
         self.isMockMode = isMockMode
         self.fallbackToMockDevices = fallbackToMockDevices
         if isMockMode || fallbackToMockDevices {
@@ -310,10 +310,8 @@ public final class ChromecastService: ChromecastServiceProtocol, @unchecked Send
 
     private func isMockDevice(_ device: CastDevice) -> Bool {
         return isMockMode ||
-            device.id.starts(with: "mock_") ||
-            device.id.starts(with: "cast_") ||
-            (device.ipAddress == "192.168.1.105" || device.ipAddress == "192.168.1.112") ||
-            Self.defaultMockDevices.contains(where: { $0.id == device.id })
+            device.id.starts(with: "mock_test_") ||
+            (fallbackToMockDevices && Self.defaultMockDevices.contains(where: { $0.id == device.id }))
     }
 
     public func connect(to device: CastDevice) async throws {

@@ -124,6 +124,70 @@ curl -X PROPFIND -u testuser:testpassword http://localhost:8082/
 | **1. 로컬 재생** | iPad 파일 앱에서 샘플 MP3/FLAC/MP4 임포트 후 재생 | 끊김 없는 즉각 재생, 파형 스크러버 반응 |
 | **2. 백그라운드 제어** | 음악 재생 중 iPad/iPhone 화면 잠금 | 소리가 멈추지 않고 잠금 화면 컨트롤러에서 조작 가능 |
 | **3. AirPlay 2** | Apple TV 또는 Mac/스피커로 AirPlay 출력 전환 | A/V 싱크 유지되며 외부 기기에서 소리 출력 |
-| **4. 크롬캐스트 브리지** | Wi-Fi 망의 스마트TV/Chromecast로 로컬 MP4 전송 | 로컬 HTTP 206 서버를 통해 TV에서 버퍼링 없이 재생 |
+| **4. 크롬캐스트 엔진** | Wi-Fi 망의 스마트TV/Chromecast로 로컬 미디어 전송 | 순수 Swift Cast V2 소켓 연결 및 로컬 HTTP 206 서버를 통해 TV에서 버퍼링 없이 재생 및 양방향 동기화 |
 | **5. 웹 전송 (Wi-Fi)** | PC 브라우저에서 `http://<iPad-IP>:8080` 접속 후 파일 업로드 | PC에서 드래그 앤 드롭한 파일이 iPad 앱 라이브러리에 즉시 표시 |
 | **6. 웹 스니퍼** | 인앱 브라우저에서 웹 영상 페이지 접속 | 하단에 "미디어 감지됨" 알약 바 노출 및 다운로드 동작 |
+
+---
+
+### 4.1 Pure-Swift Chromecast Production Engine 상세 실기기 검증 절차
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as iPad/iPhone (LivelyMedia)
+    participant Receiver as Chromecast / Google TV (Port 8009)
+    participant Bridge as Local HTTP 206 Server (:8080)
+
+    Note over App,Receiver: 1. mDNS Scanning & Discovery
+    App->>Receiver: mDNS 브로드캐스트 검색 (_googlecast._tcp)
+    Receiver-->>App: Bonjour TXT 레코드 응답 (기기명, IP)
+    
+    Note over App,Receiver: 2. Cast V2 TLS Socket & Heartbeat
+    App->>Receiver: TLS 소켓 연결 (Port 8009, Self-Signed Cert 승인)
+    App->>Receiver: [tp.connection] CONNECT & [receiver] LAUNCH (CC1AD845)
+    loop Heartbeat (5초 주기)
+        App->>Receiver: [tp.heartbeat] PING
+        Receiver-->>App: [tp.heartbeat] PONG
+    end
+
+    Note over App,Bridge: 3. HTTP 206 Range Stream Delivery
+    App->>Receiver: [media] LOAD (http://<iOS-LAN-IP>:8080/stream/sample.mp4)
+    Receiver->>Bridge: GET /stream/sample.mp4 (Range: bytes=0-32767)
+    Bridge-->>Receiver: HTTP/1.1 206 Partial Content
+    Receiver->>Bridge: GET /stream/sample.mp4 (Range: bytes=32768-...)
+    Bridge-->>Receiver: 연속 미디어 청크 스트리밍
+
+    Note over App,Receiver: 4. Playback Synchronization
+    Receiver-->>App: [media] MEDIA_STATUS (currentTime, playerState: "PLAYING")
+    App->>Receiver: [media] PAUSE / SEEK / SET_VOLUME
+    Receiver-->>App: 업데이트된 재생 위치 및 볼륨 동기화
+```
+
+#### Step 1: mDNS 디바이스 스캐닝 (Discovery Verification)
+- **동작 확인**: 앱 내 상단/플레이어 바의 Cast 버튼을 탭하여 Cast 시트 호출.
+- **검증 항목**:
+  1. `Network.framework` `NWBrowser`가 `_googlecast._tcp` Bonjour 서비스를 감지하는지 확인.
+  2. 동일 Wi-Fi LAN 내의 Chromecast / Google TV 기기 이름(`fn` 속성)과 모델 정보가 시트 목록에 1초 이내에 실시간으로 표시되는지 확인.
+
+#### Step 2: Cast V2 소켓 연결 및 하트비트 (TLS Socket Handshake)
+- **동작 확인**: 검색된 기기 목록에서 대상을 선택하여 연결.
+- **검증 항목**:
+  1. 대상 기기 IP의 포트 `8009`로 TLS TCP 소켓(`NWConnection`) 연결 성공.
+  2. 자체 서명 X.509 인증서 신뢰 블록(`sec_protocol_options_set_verify_block`)이 정상 통과되는지 확인.
+  3. `urn:x-cast:com.google.cast.receiver` 채널을 통해 기본 미디어 수신기(`CC1AD845`) 앱이 실행되어 TV 화면에 Cast 대기 화면이 표시되는지 확인.
+  4. 5초 주기로 `PING` / `PONG` 하트비트가 오가며 백그라운드 연결이 안정적으로 유지되는지 확인.
+
+#### Step 3: HTTP 206 Range 부분 전송 스트리밍 (Byte-Range Delivery)
+- **동작 확인**: 로컬 샌드박스에 저장된 1080p MP4 또는 고음질 FLAC/MP3 파일 재생 중 Cast 전송 실행.
+- **검증 항목**:
+  1. 기기의 Wi-Fi 인터페이스 LAN IP(`getifaddrs`)가 정확히 해석되어 `http://<iOS-IP>:8080/stream/<filename>` 형태의 스트림 URL이 수신기로 전달되는지 확인.
+  2. 크롬캐스트 수신기가 파일 헤더(moov atom 등)를 읽기 위해 보내는 `Range: bytes=0-32767` 요청에 대해 `FlyingFox` 임베디드 서버가 `HTTP/1.1 206 Partial Content` 및 `Content-Range` 헤더로 정확히 응답하는지 확인.
+  3. TV 화면에서 버퍼링 및 끊김 없이 부드럽게 비디오/오디오가 하드웨어 디코딩 재생되는지 확인.
+
+#### Step 4: 원격 재생 제어 및 양방향 타임라인 동기화 (Playback Sync)
+- **동작 확인**: 앱 화면의 재생/일시정지 버튼, 탐색 스크러버(Seek), 볼륨 슬라이더 조작.
+- **검증 항목**:
+  1. `urn:x-cast:com.google.cast.media` 채널로 `PLAY`, `PAUSE`, `SEEK`, `SET_VOLUME` JSON 페이로드가 즉각 전송되는지 확인.
+  2. TV 수신기로부터 주기적으로 수신되는 `MEDIA_STATUS` 메시지의 `currentTime`과 `playerState`가 iOS 앱의 SwiftUI 뷰(`@MainActor`)로 즉시 반영되어 진행 바가 원격 TV와 1:1 일치하는지 확인.
+  3. Cast 시트에서 "연결 해제(Disconnect)" 탭 시 소켓이 안전하게 종료되고 앱이 로컬 재생 모드로 복귀하는지 확인.

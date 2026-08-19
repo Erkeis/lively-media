@@ -167,23 +167,110 @@ CREATE TABLE IF NOT EXISTS bookmarks (
 ### 4.1 AirPlay 2
 - Handled natively through `AVRoutePickerView` and standard `AVPlayerItem` routing.
 
-### 4.2 Google Cast (Chromecast) Local HTTP Range Bridge
-Chromecast devices cannot read iOS sandbox files directly. The app runs a background HTTP server serving byte ranges:
+### 4.2 Pure-Swift Cast V2 Socket Protocol & Local HTTP Range Bridge
+
+#### 4.2.1 Architectural Rationale: Why Pure Swift instead of Closed-Source Binary SDKs
+The standard Google Cast iOS SDK (`GoogleCast.xcframework`) is a large, closed-source binary distribution with legacy Objective-C/C++ dependencies. It introduces critical architectural roadblocks for modern multi-device media platforms:
+1. **Swift Playgrounds & Toolchain Portability**: Closed-source binary `.xcframework` dependencies cannot be built or linked inside Swift Playgrounds on iPad Air 5 (M1 Apple Silicon) and fail on clean headless Linux/macOS SwiftPM test environments without complex workarounds.
+2. **Memory Footprint & Bloat**: Proprietary SDK binaries inject dozens of auxiliary tracking routines and heavy runtime symbols that compromise the app's strict memory ceiling (< 100MB active footprint on iPhone 11).
+3. **Swift 6 Concurrency Compliance**: Legacy RunLoop and delegate callbacks in the binary SDK conflict with Swift 6 strict concurrency checks (`@Sendable`, `actor` isolation, and `@MainActor` UI hierarchies).
+
+To maintain zero binary dependencies, absolute cross-platform compilation, and strict Swift 6 concurrency safety, LivelyMedia implements a **Pure-Swift Cast V2 Engine** built on Apple's native `Network.framework` (`NWBrowser` and `NWConnection`) coupled with an embedded async HTTP Range 206 streaming bridge (`FlyingFox`).
+
+#### 4.2.2 Cast V2 Protocol Framing & Channel Architecture
+
+```mermaid
+graph TB
+    subgraph Discovery_Layer [Discovery & Network Transport]
+        mDNS[NWBrowser mDNS Discovery: _googlecast._tcp.local.]
+        NWConn[NWConnection TLS Socket: Port 8009]
+        TLSConfig[Custom TLS Trust: Bypass Self-Signed Cast Cert Validation]
+    end
+
+    subgraph Framing_Layer [Cast V2 Wire Framing]
+        Header[4-Byte Big-Endian Length Prefix: UInt32]
+        Payload[Serialized CastMessage JSON/Protobuf Payload]
+    end
+
+    subgraph Channels [Virtual Namespaces / Channels]
+        ConnChan[urn:x-cast:com.google.cast.tp.connection (CONNECT / CLOSE)]
+        HeartbeatChan[urn:x-cast:com.google.cast.tp.heartbeat (PING / PONG @ 5s)]
+        ReceiverChan[urn:x-cast:com.google.cast.receiver (LAUNCH CC1AD845 / GET_STATUS)]
+        MediaChan[urn:x-cast:com.google.cast.media (LOAD / PLAY / PAUSE / SEEK / STATUS)]
+    end
+
+    subgraph Bridge_Layer [Local Sandbox Streaming Bridge]
+        HTTPBridge[Embedded FlyingFox Server :8080]
+        ByteRange[HTTP 206 Partial Content: Range: bytes=X-Y]
+        SandboxMedia[App Sandbox Media Files]
+    end
+
+    mDNS --> NWConn
+    TLSConfig --> NWConn
+    NWConn --> Header
+    Header --> Payload
+    Payload --> ConnChan
+    Payload --> HeartbeatChan
+    Payload --> ReceiverChan
+    Payload --> MediaChan
+    MediaChan -.->|Directs to Stream URL| HTTPBridge
+    HTTPBridge --> ByteRange
+    ByteRange --> SandboxMedia
+```
+
+1. **mDNS Device Discovery**:
+   - `NWBrowser` scans for Bonjour services of type `_googlecast._tcp` on domain `local.`.
+   - Parses TXT records (`fn` for friendly device name, `md` for model name, `id` for device UUID).
+2. **TLS Port 8009 Socket Transport**:
+   - Establishes a secure TCP socket to the target IP on port `8009` via `NWConnection`.
+   - Google Cast hardware uses self-signed X.509 device certificates; the connection configures `sec_protocol_options_set_verify_block` to permit the TLS handshake without failing system CA checks.
+3. **Wire Packet Framing**:
+   - All messages over the socket are framed with a **4-byte big-endian unsigned integer** specifying the byte length of the following payload, followed by the UTF-8 serialized `CastMessage` payload.
+4. **Cast V2 Channel Namespaces**:
+   - **Connection Channel** (`urn:x-cast:com.google.cast.tp.connection`): Handles transport session initialization (`{"type": "CONNECT"}`) and teardown (`{"type": "CLOSE"}`).
+   - **Heartbeat Channel** (`urn:x-cast:com.google.cast.tp.heartbeat`): Exchanges `PING` and `PONG` packets every 5 seconds to keep the socket alive; triggers automatic reconnection if consecutive heartbeats timeout.
+   - **Receiver Channel** (`urn:x-cast:com.google.cast.receiver`): Launches the Default Media Receiver app ID (`CC1AD845`) and captures `sessionId` and `transportId`.
+   - **Media Channel** (`urn:x-cast:com.google.cast.media`): Dispatches `LOAD` (with media metadata, MIME type, stream URL), `PLAY`, `PAUSE`, `SEEK`, `SET_VOLUME`, and processes `MEDIA_STATUS` broadcasts to maintain real-time position synchronization.
+
+#### 4.2.3 End-to-End Cast & Streaming Sequence
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant App as iOS App UI
-    participant Bridge as Local HTTP Bridge (FlyingFox)
-    participant Cast as Chromecast Receiver
+    autonumber
+    participant UI as SwiftUI Cast Sheet / Coordinator
+    participant Engine as Pure-Swift CastEngine (NWConnection)
+    participant Bridge as Local HTTP Bridge (FlyingFox :8080)
+    participant Receiver as Chromecast Device (Port 8009)
 
-    User->>App: Tap Cast to Chromecast
-    App->>Bridge: Register Local Stream Endpoint (port 8080)
-    Bridge-->>App: Local Stream URL (http://192.168.1.50:8080/stream/video.mp4)
-    App->>Cast: GCKCastContext.loadMedia(Stream URL)
-    Cast->>Bridge: GET /stream/video.mp4 (Range: bytes=0-1048575)
-    Bridge-->>Cast: HTTP 206 Partial Content (Bytes 0-1048575)
-    Cast-->>App: Playback Sync (Current Time, Duration, State)
+    UI->>Engine: startDiscovery()
+    Engine->>Receiver: mDNS Probe (_googlecast._tcp)
+    Receiver-->>Engine: TXT Record (Living Room TV, 192.168.1.105)
+    Engine-->>UI: Update availableDevices List
+
+    UI->>Engine: connect(device)
+    Engine->>Receiver: TLS Handshake (Port 8009, Trust Self-Signed)
+    Engine->>Receiver: [tp.connection] CONNECT (source: sender-0, dest: receiver-0)
+    Engine->>Receiver: [receiver] LAUNCH (appId: "CC1AD845")
+    Receiver-->>Engine: [receiver] RECEIVER_STATUS (sessionId, transportId: web-42)
+    Engine->>Receiver: [tp.connection] CONNECT (dest: web-42)
+
+    loop Heartbeat Loop (Every 5s)
+        Engine->>Receiver: [tp.heartbeat] PING
+        Receiver-->>Engine: [tp.heartbeat] PONG
+    end
+
+    UI->>Engine: castCurrentItem(mediaItem)
+    Engine->>Bridge: Register local stream endpoint (/stream/movie.mp4)
+    Bridge-->>Engine: Stream URL (http://192.168.1.50:8080/stream/movie.mp4)
+    Engine->>Receiver: [media] LOAD (streamURL, contentType: "video/mp4", title)
+    
+    loop Dynamic Range 206 Streaming
+        Receiver->>Bridge: GET /stream/movie.mp4 (Range: bytes=0-1048575)
+        Bridge-->>Receiver: HTTP/1.1 206 Partial Content (Content-Range: 0-1048575/Total)
+    end
+
+    Receiver-->>Engine: [media] MEDIA_STATUS (currentTime, playerState: "PLAYING")
+    Engine-->>UI: Sync Playback Position & Remote State
 ```
 
 ---

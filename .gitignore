@@ -22,3 +22,8 @@ DerivedData/
 # Environment & credentials
 .env
 .env.local
+
+# Worktrees
+.worktrees/
+worktrees/
+

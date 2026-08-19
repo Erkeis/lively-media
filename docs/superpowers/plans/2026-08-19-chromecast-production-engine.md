@@ -40,10 +40,10 @@ git commit -m "docs: document pure-Swift Cast V2 architecture and real-world tes
 - Modify: `ios/Sources/CastEngine/CastTarget.swift`
 - Test: `ios/Tests/CastEngineTests/CastEngineTests.swift`
 
-- [ ] **Step 1: Write unit tests for Cast V2 payload serialization and packet framing**
-- [ ] **Step 2: Implement CastV2Protocol message structs (`CastMessage`, `MediaLoadCommand`, `MediaControlCommand`)**
-- [ ] **Step 3: Run tests to verify Cast V2 message serialization**
-- [ ] **Step 4: Commit**
+- [x] **Step 1: Write unit tests for Cast V2 payload serialization and packet framing**
+- [x] **Step 2: Implement CastV2Protocol message structs (`CastMessage`, `MediaLoadCommand`, `MediaControlCommand`)**
+- [x] **Step 3: Run tests to verify Cast V2 message serialization**
+- [x] **Step 4: Commit**
 
 ```bash
 git add ios/Sources/CastEngine/CastV2Protocol.swift ios/Sources/CastEngine/CastTarget.swift ios/Tests/CastEngineTests/CastEngineTests.swift
